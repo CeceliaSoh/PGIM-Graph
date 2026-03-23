@@ -5,7 +5,7 @@ import pandas as pd
 
 
 EARTH_RADIUS_KM = 6371.0088
-MAX_DISTANCE_KM = 1.0
+MAX_DISTANCE_KM = 0.25
 CHUNK_SIZE = 500
 
 

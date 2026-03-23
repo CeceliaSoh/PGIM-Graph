@@ -3,9 +3,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from pymongo import MongoClient
-
-
 TARGET_COLUMN = "Avg_rent_per_sqm"
 TIMESTAMP_COLUMN = "Lease Commencement Date"
 NODE_COLUMN = "Project Name"
@@ -18,8 +15,7 @@ INTERNAL_NODE_COLUMN = "project_name"
 INTERNAL_LAT_COLUMN = "latitude"
 INTERNAL_LON_COLUMN = "longitude"
 INTERNAL_PROJECT_ID_COLUMN = "project_id"
-MONGO_URI = "mongodb://localhost:27017/"
-MONGO_DB_NAME = "property_db"
+EXPORT_DIRNAME = "mongodb_exports"
 EARTH_RADIUS_KM = 6371.0088
 CHUNK_SIZE = 500
 GRAPH_RULES = [
@@ -178,26 +174,25 @@ def ensure_project_keys(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
     return result
 
 
-def load_mongodb_collections():
-    client = MongoClient(MONGO_URI)
-    db = client[MONGO_DB_NAME]
+def load_exported_collections(base_dir: Path):
+    export_dir = base_dir / "dataset" / EXPORT_DIRNAME
     collections = {}
 
     for logical_name, collection_name in COLLECTION_CONFIG.items():
-        records = list(db[collection_name].find({}))
-        frame = pd.DataFrame(records)
-        if "_id" in frame.columns:
-            frame = frame.drop(columns=["_id"])
+        csv_path = export_dir / f"{collection_name}.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Expected export file not found: {csv_path}")
+        frame = pd.read_csv(csv_path)
         frame = ensure_project_keys(frame, logical_name)
         collections[logical_name] = frame
-        log(f"Loaded MongoDB collection '{collection_name}': {len(frame):,} rows")
+        log(f"Loaded exported collection '{collection_name}' from {csv_path.name}: {len(frame):,} rows")
 
     return collections
 
 
 def register_feature_group_columns(collections) -> None:
     FEATURE_GROUP_COLUMNS["macro"] = sorted(
-        column for column in collections["Macro_Data"].columns if column not in {"date"}
+        column for column in collections["Macro_Data"].columns if column not in {"date", "project_name_join"}
     )
     FEATURE_GROUP_COLUMNS["school"] = sorted(
         column
@@ -242,6 +237,8 @@ def merge_with_fallback(left_df: pd.DataFrame, right_df: pd.DataFrame, dataset_n
         suffixes=("", "_fallback"),
     )
 
+    protected_columns = {INTERNAL_PROJECT_ID_COLUMN, INTERNAL_NODE_COLUMN, "project_name_join"}
+
     right_columns = [
         column
         for column in right.columns
@@ -251,12 +248,15 @@ def merge_with_fallback(left_df: pd.DataFrame, right_df: pd.DataFrame, dataset_n
     for column in right_columns:
         rhs_column = f"{column}_rhs"
         fallback_column = f"{column}_fallback"
+        left_values = merged[column].copy() if column in merged.columns else None
         if rhs_column in merged.columns:
             merged[column] = merged[rhs_column]
         if column not in merged.columns:
             merged[column] = np.nan
         if fallback_column in fallback.columns:
             merged[column] = merged[column].where(merged[column].notna(), fallback[fallback_column])
+        if column in protected_columns and left_values is not None:
+            merged[column] = merged[column].where(merged[column].notna(), left_values)
 
     extra_columns = [column for column in merged.columns if column.endswith("_rhs")]
     fallback_columns = [column for column in fallback.columns if column.endswith("_fallback")]
@@ -344,6 +344,15 @@ def compute_age_of_property(df: pd.DataFrame) -> pd.Series:
     return age.fillna(-1).astype(np.float32)
 
 
+def compute_previous_project_price(df: pd.DataFrame) -> pd.Series:
+    previous_price = (
+        pd.to_numeric(df[TARGET_COLUMN], errors="coerce")
+        .groupby(df[NODE_COLUMN])
+        .shift(1)
+    )
+    return previous_price.fillna(0).astype(np.float32)
+
+
 def build_ordered_feature_dataframe(df: pd.DataFrame):
     feature_blocks = []
     feature_columns = []
@@ -389,12 +398,15 @@ def build_ordered_feature_dataframe(df: pd.DataFrame):
             LAT_COLUMN: pd.to_numeric(df[LAT_COLUMN], errors="coerce").fillna(0).astype(np.float32),
             LON_COLUMN: pd.to_numeric(df[LON_COLUMN], errors="coerce").fillna(0).astype(np.float32),
             "age_of_property": compute_age_of_property(df),
+            "previous_avg_rent_per_sqm": compute_previous_project_price(df),
         },
         index=df.index,
     )
     feature_blocks.append(scalar_block)
     feature_columns.extend(scalar_block.columns.tolist())
-    report_sections.append(("latitude/longitude/age_of_property", scalar_block.columns.tolist(), None))
+    report_sections.append(
+        ("latitude/longitude/age_of_property/previous_avg_rent_per_sqm", scalar_block.columns.tolist(), None)
+    )
 
     macro_columns = [column for column in FEATURE_GROUP_COLUMNS["macro"] if column in df.columns]
     macro_block = (
@@ -504,7 +516,9 @@ def build_temporal_tensors(df, node_frame):
         log(f"Interpolated {interpolated_count:,} missing target values using linear interpolation.")
     targets = np.nan_to_num(interpolated_targets.to_numpy(dtype=np.float32), nan=0.0)
 
-    return features, targets, observation_mask, timestamp_values, feature_columns, report_sections
+    feature_mask = np.any(features != 0, axis=2)
+
+    return features, feature_mask, targets, observation_mask, timestamp_values, feature_columns, report_sections
 
 
 def haversine_chunk(lat1_rad, lon1_rad, lat2_rad, lon2_rad):
@@ -638,10 +652,11 @@ def generate_feature_index_report(report_path: Path, report_sections, feature_co
 def main():
     base_dir = Path(__file__).resolve().parent
     feature_output_path = base_dir / "dataset" / "feature.npy"
+    feature_mask_output_path = base_dir / "dataset" / "feature_mask.npy"
     graph_output_path = base_dir / "dataset" / "graph.pt"
     report_output_path = base_dir / "dataset" / "feature_index_report.txt"
 
-    collections = load_mongodb_collections()
+    collections = load_exported_collections(base_dir)
     register_feature_group_columns(collections)
     df = merge_project_temporal_data(collections)
     df[TIMESTAMP_COLUMN] = pd.to_datetime(df[TIMESTAMP_COLUMN], errors="coerce")
@@ -688,13 +703,14 @@ def main():
     missing_node_keys = int(node_frame[PROJECT_ID_COLUMN].isna().sum())
     log(f"Node frame duplicates={duplicate_nodes:,}, missing project_id={missing_node_keys:,}")
 
-    features, targets, observation_mask, timestamp_values, feature_columns, report_sections = build_temporal_tensors(
+    features, feature_mask, targets, observation_mask, timestamp_values, feature_columns, report_sections = build_temporal_tensors(
         df, node_frame
     )
     graph_variants = build_graph_variants(node_frame, GRAPH_RULES)
     default_graph = graph_variants[DEFAULT_GRAPH_NAME]
 
     np.save(feature_output_path, features)
+    np.save(feature_mask_output_path, feature_mask)
     generate_feature_index_report(report_output_path, report_sections, feature_columns)
 
     graph_data = {
@@ -710,6 +726,7 @@ def main():
         "timestamps": timestamp_values,
         "feature_columns": feature_columns,
         "feature_path": str(feature_output_path),
+        "feature_mask_path": str(feature_mask_output_path),
         "distance_threshold_km": default_graph["max_distance_km"],
         "target_column": TARGET_COLUMN,
         "default_graph_name": DEFAULT_GRAPH_NAME,
@@ -728,14 +745,18 @@ def main():
     torch.save(graph_data, graph_output_path)
 
     print(f"Saved features to: {feature_output_path}")
+    print(f"Saved feature mask to: {feature_mask_output_path}")
     print(f"Saved graph to: {graph_output_path}")
     print(f"Saved feature report to: {report_output_path}")
     print(f"Feature tensor shape [T, N, F]: {features.shape}")
+    print(f"Feature mask shape [T, N]: {feature_mask.shape}")
     print(f"Target tensor shape [T, N]: {targets.shape}")
     print(f"Observation mask shape [T, N]: {observation_mask.shape}")
     print(f"Unique nodes: {len(node_frame):,}")
     print(f"Unique timestamps: {len(timestamp_values):,}")
     print(f"Feature dimension: {len(feature_columns):,}")
+    print(f"Observed node-time pairs with assigned features: {int(feature_mask.sum()):,}")
+    print(f"Total non-zero feature values: {int(np.count_nonzero(features)):,}")
     print("Graph variants:")
     for name, graph in graph_variants.items():
         print(
