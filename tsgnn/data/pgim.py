@@ -92,7 +92,8 @@ class PGIMDataset(Dataset):
 
         train_features = feat_train[:, :, 1:-2]
         train_min = train_max = None
-        if self.feat_norm:
+        should_normalize_on_load = self.feat_norm and self.num_hops == 0
+        if should_normalize_on_load:
             train_min, train_max = compute_minmax_stats(train_features)
 
         # data: [N, T, D_total]
@@ -100,7 +101,7 @@ class PGIMDataset(Dataset):
         self.y = data[:, :, -2]           # [N, T]
         self.y_mask = data[:, :, -1]      # [N, T]
 
-        if self.feat_norm:
+        if should_normalize_on_load:
             self.features, _, _ = normalize_to_minus1_1(self.features, train_min, train_max)
 
 
@@ -113,7 +114,7 @@ class PGIMDataset(Dataset):
                 feat_train[:, -self.window_size:, -1]
             )  # [N, w]
             feat_train = train_features
-            if self.feat_norm:
+            if should_normalize_on_load:
                 feat_train, _, _ = normalize_to_minus1_1(feat_train, train_min, train_max)
             
             self.feat_last_window = feat_train[:, -self.window_size:, :]   # [N, w, D]
@@ -126,9 +127,14 @@ class PGIMDataset(Dataset):
     def _add_hop_features(self):
         train_path = Path(self.train_path)
         test_path = Path(self.test_path)
+        cache_version = "norm_before_agg_v1"
 
-        train_feat_hop = train_path.with_name(f"{train_path.stem}_hop_{self.num_hops}_{self.feat_norm}.npy")
-        test_feat_hop = test_path.with_name(f"{test_path.stem}_hop_{self.num_hops}_{self.feat_norm}.npy")
+        train_feat_hop = train_path.with_name(
+            f"{train_path.stem}_hop_{self.num_hops}_{self.feat_norm}_{cache_version}.npy"
+        )
+        test_feat_hop = test_path.with_name(
+            f"{test_path.stem}_hop_{self.num_hops}_{self.feat_norm}_{cache_version}.npy"
+        )
 
         if os.path.exists(train_feat_hop) and os.path.exists(test_feat_hop):
             self.train_path = train_feat_hop
@@ -143,6 +149,11 @@ class PGIMDataset(Dataset):
 
         x_test = feat_test[:, :, 1:-2]      # [N, T, D]
         yt_test = feat_test[:, :, -2:]     # [N, T, 2]
+
+        if self.feat_norm:
+            train_min, train_max = compute_minmax_stats(x_train)
+            x_train, _, _ = normalize_to_minus1_1(x_train, train_min, train_max)
+            x_test, _, _ = normalize_to_minus1_1(x_test, train_min, train_max)
 
         graph_data = torch.load(self.graph_path)
         adj_norm = build_row_normalized_adj(graph_data, add_self_loop=True)  # [N, N]

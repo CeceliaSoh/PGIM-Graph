@@ -1,7 +1,7 @@
 import numpy as np
 
 # Step 1: load numpy file
-arr = np.load("dataset/feature_ccr_v3.1.1_within_250m_test.npy")   # shape: [N, T, D]
+arr = np.load("dataset/feature_ccr_v3.1.1_within_250m_train.npy")   # shape: [N, T, D]
 # output_path = "dataset/feature_ccr_v3.1.1_within_250m_test.npy"
 print("Shape:", arr.shape)
 
@@ -23,3 +23,6 @@ print(feature_indices)
 # np.save(output_path, arr)
 
 # print(f"Saved processed file to: {output_path}")
+
+print("Mean and std of feature -2:")
+print(np.mean(arr[:,:,-2]), np.std(arr[:,:,-2]), np.min(arr[:,:,-2]), np.max(arr[:,:,-2]))
