@@ -26,3 +26,5 @@ print(feature_indices)
 
 print("Mean and std of feature -2:")
 print(np.mean(arr[:,:,-2]), np.std(arr[:,:,-2]), np.min(arr[:,:,-2]), np.max(arr[:,:,-2]))
+print("Mean and std of feature -3:")
+print(np.mean(arr[:,:,-3]), np.std(arr[:,:,-3]), np.min(arr[:,:,-3]), np.max(arr[:,:,-3]))
