@@ -217,8 +217,11 @@ __marimo__/
 
 # Dataset
 dataset/
+dataset_v0/
 
 # Experiment
 experiments/
 checkpoints/
 wandb/
+
+.codex

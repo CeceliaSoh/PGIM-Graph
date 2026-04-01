@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tsgnn.models.common import MyLinear
+from src.models.common import MyLinear
 
 class PositionalEncoder(nn.Module):
     """
@@ -52,20 +52,15 @@ class Transformer(nn.Module):
                  att_drop_rate=0.0,
                  residual=True,
                  fast_forward=False,
-                 fast_forward_hidden_dim=None,
                  fast_forward_rate=4.0,
                  layer_norm=True):
         super().__init__()
-
-        if units % heads != 0:
-            raise ValueError(f"units ({units}) must be divisible by heads ({heads}).")
 
         self.units = units
         self.heads = heads
         self.residual = residual
         self.fast_forward = fast_forward
         self.layer_norm = layer_norm
-        self.fast_forward_hidden_dim = fast_forward_hidden_dim
 
         self.dropout = nn.Dropout(drop_rate)
         self.att_dropout = nn.Dropout(att_drop_rate)
@@ -75,15 +70,10 @@ class Transformer(nn.Module):
         self.dense_value = MyLinear(in_channels, units)
 
         if fast_forward:
-            ff_hidden_dim = (
-                int(units * fast_forward_rate)
-                if fast_forward_hidden_dim is None
-                else fast_forward_hidden_dim
-            )
             self.ff = nn.Sequential(
-                MyLinear(units, ff_hidden_dim),
+                MyLinear(units, int(units * fast_forward_rate)),
                 nn.ReLU(),
-                MyLinear(ff_hidden_dim, units)
+                MyLinear(int(units * fast_forward_rate), units)
             )
 
         # Causal mask (tril)

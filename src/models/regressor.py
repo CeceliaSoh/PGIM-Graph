@@ -1,23 +1,13 @@
 import torch
 import torch.nn as nn
-from tsgnn.models.transformer import Transformer, PositionalEncoder
-from tsgnn.models.common import MyLinear
+from src.models.transformer import Transformer, PositionalEncoder
+from src.models.common import MyLinear
 
 class TransformerRegressor(nn.Module):
     """
     Transformer-based model for time series regression (e.g., next-step prediction).
     """
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        units,
-        ff_hidden_dim,
-        len_ts,
-        num_layers=2,
-        heads=8,
-        dropout=0.1,
-    ):
+    def __init__(self, in_channels, out_channels, units, len_ts, num_layers=2, heads=8, dropout=0.1):
         super().__init__()
         
         # Project input channels to hidden units
@@ -32,8 +22,7 @@ class TransformerRegressor(nn.Module):
                 len_ts=len_ts, 
                 heads=heads, 
                 drop_rate=dropout, 
-                fast_forward=True,
-                fast_forward_hidden_dim=ff_hidden_dim,
+                fast_forward=True
             ) for _ in range(num_layers)
         ])
         
