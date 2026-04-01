@@ -154,6 +154,7 @@ def get_dataloaders(
     mask_col="y_mask",
     feat_norm=True,
     window_size=12,
+    target_mask_mode="observed_only",
 ):
     del no_feat_col, target_col, mask_col
 
@@ -163,27 +164,56 @@ def get_dataloaders(
     if feat.ndim != 3:
         raise ValueError(f"Expected feature tensor with shape (N, T, D), got {feat.shape}")
 
-    if shift > 0:
-        X = feat[:, :, :-1]
-        Y = feat[:, :, -2]
-        mask = feat[:, :, -1].astype(bool)
+    y_mask = feat[:, :, -1].astype(bool)
 
-        total_steps = Y.shape[1]
-        if shift >= total_steps:
-            raise ValueError(f"shift={shift} must be smaller than T={total_steps}")
+    def build_masks_for_mode(mode: str):
+        if shift > 0:
+            X_local = feat[:, :, :-1]
+            Y_local = feat[:, :, -2]
+            x_mask = np.any(X_local != 0, axis=2)
 
-        Y_shift = np.zeros_like(Y)
-        mask_shift = np.zeros_like(mask, dtype=bool)
+            total_steps_local = Y_local.shape[1]
+            if shift >= total_steps_local:
+                raise ValueError(f"shift={shift} must be smaller than T={total_steps_local}")
 
-        Y_shift[:, :-shift] = Y[:, shift:]
-        mask_shift[:, :-shift] = mask[:, shift:]
+            Y_shift = np.zeros_like(Y_local)
+            y_mask_shift = np.zeros_like(y_mask, dtype=bool)
+            horizon_mask = np.zeros_like(x_mask, dtype=bool)
+            shifted_y_nonzero = np.zeros_like(y_mask, dtype=bool)
 
-        Y = Y_shift
-        mask = np.logical_and(mask, mask_shift)
-    else:
-        X = feat[:, :, 1:-2]
-        Y = feat[:, :, -2]
-        mask = feat[:, :, -1].astype(bool)
+            Y_shift[:, :-shift] = Y_local[:, shift:]
+            y_mask_shift[:, :-shift] = y_mask[:, shift:]
+            horizon_mask[:, :-shift] = True
+            shifted_y_nonzero[:, :-shift] = Y_local[:, shift:] != 0
+
+            if mode == "observed_only":
+                mask_local = np.logical_and(y_mask, y_mask_shift)
+            elif mode == "allow_interpolated":
+                mask_local = np.logical_and(x_mask, horizon_mask)
+                mask_local = np.logical_and(mask_local, shifted_y_nonzero)
+            else:
+                raise ValueError(
+                    f"Unknown target_mask_mode='{mode}'. "
+                    "Expected one of ['observed_only', 'allow_interpolated', 'train_allow_interpolated']."
+                )
+            return X_local, Y_shift, mask_local
+
+        X_local = feat[:, :, 1:-2]
+        Y_local = feat[:, :, -2]
+        x_mask = np.any(X_local != 0, axis=2)
+        if mode == "observed_only":
+            mask_local = y_mask
+        elif mode == "allow_interpolated":
+            mask_local = np.logical_and(x_mask, Y_local != 0)
+        else:
+            raise ValueError(
+                f"Unknown target_mask_mode='{mode}'. "
+                "Expected one of ['observed_only', 'allow_interpolated', 'train_allow_interpolated']."
+            )
+        return X_local, Y_local, mask_local
+
+    effective_mode = "allow_interpolated" if target_mask_mode == "train_allow_interpolated" else target_mask_mode
+    X, Y, mask = build_masks_for_mode(effective_mode)
 
     num_nodes, total_steps, feat_dim = X.shape
     print(f"Condos: {num_nodes} | Timestamps: {total_steps} | feat_dim: {feat_dim}")
@@ -197,7 +227,13 @@ def get_dataloaders(
     y_train = Y[:, :train_steps]
     y_test = Y[:, train_steps:]
     mask_train = mask[:, :train_steps]
-    mask_test = mask[:, train_steps:]
+    if target_mask_mode == "train_allow_interpolated":
+        _, _, observed_mask = build_masks_for_mode("observed_only")
+        mask_test = observed_mask[:, train_steps:]
+        full_mask = np.concatenate([mask_train, mask_test], axis=1)
+    else:
+        mask_test = mask[:, train_steps:]
+        full_mask = mask
 
     if feat_norm:
         train_min, train_max = compute_minmax_stats(x_train)
@@ -233,7 +269,7 @@ def get_dataloaders(
     test_positions = collect_valid_positions(mask_test, offset=train_steps)
 
     train_ds = WindowedNodeDataset(train_hops, y_train, mask_train, train_positions, window_size)
-    test_ds = WindowedNodeDataset(full_hops, y_full, mask, test_positions, window_size)
+    test_ds = WindowedNodeDataset(full_hops, y_full, full_mask, test_positions, window_size)
 
     print(
         f"Train samples: {len(train_ds)} | Test samples: {len(test_ds)} | "
@@ -254,15 +290,95 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=2, help="Number of SIGN hops")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--shift", type=int, default=1)
+    parser.add_argument(
+        "--target-mask-mode",
+        type=str,
+        choices=("observed_only", "allow_interpolated", "train_allow_interpolated"),
+        default="observed_only",
+        help="Whether to count only observed targets, allow interpolated targets for both train/test, or allow them only in train.",
+    )
     parser.add_argument("--window-size", type=int, default=12)
     parser.add_argument(
         "--no-feat-norm",
         action="store_true",
         help="Disable train-set min-max normalization to [-1, 1]",
     )
+    parser.add_argument(
+        "--report-shifts",
+        action="store_true",
+        help="Print valid train/test sample counts for shifts 0, 1, and 12.",
+    )
     args = parser.parse_args()
 
-    train_loader, test_loader = get_data_loader(
+    if args.report_shifts:
+        feat_npy = os.path.join(args.root, args.feature)
+        feat = np.load(feat_npy).astype(np.float32)
+
+        if feat.ndim != 3:
+            raise ValueError(f"Expected feature tensor with shape (N, T, D), got {feat.shape}")
+
+        total_steps = feat.shape[1]
+        train_steps = total_steps - args.ts_test
+        base_mask = feat[:, :, -1].astype(bool)
+
+        def build_valid_mask(shift_value: int, mode: str):
+            feature_tensor = feat[:, :, :-1] if shift_value > 0 else feat[:, :, 1:-2]
+            x_mask = np.any(feature_tensor != 0, axis=2)
+            shifted_y = feat[:, :, -2]
+
+            if shift_value > 0:
+                shifted_target_mask = np.zeros_like(base_mask, dtype=bool)
+                shifted_target_mask[:, :-shift_value] = base_mask[:, shift_value:]
+                shifted_y_nonzero = np.zeros_like(base_mask, dtype=bool)
+                shifted_y_nonzero[:, :-shift_value] = shifted_y[:, shift_value:] != 0
+                horizon_mask = np.zeros_like(x_mask, dtype=bool)
+                horizon_mask[:, :-shift_value] = True
+
+                if mode == "observed_only":
+                    valid_mask_local = np.logical_and(base_mask, shifted_target_mask)
+                elif mode == "allow_interpolated":
+                    valid_mask_local = np.logical_and(x_mask, horizon_mask)
+                    valid_mask_local = np.logical_and(valid_mask_local, shifted_y_nonzero)
+                else:
+                    raise ValueError(
+                        f"Unknown target_mask_mode='{mode}'. "
+                        "Expected one of ['observed_only', 'allow_interpolated', 'train_allow_interpolated']."
+                    )
+            else:
+                if mode == "observed_only":
+                    valid_mask_local = base_mask
+                elif mode == "allow_interpolated":
+                    valid_mask_local = np.logical_and(x_mask, shifted_y != 0)
+                else:
+                    raise ValueError(
+                        f"Unknown target_mask_mode='{mode}'. "
+                        "Expected one of ['observed_only', 'allow_interpolated', 'train_allow_interpolated']."
+                    )
+            return valid_mask_local
+
+        print("\nValid sample counts by shift:")
+        for shift in (0, 1, 12):
+            if shift >= total_steps:
+                raise ValueError(f"shift={shift} must be smaller than T={total_steps}")
+
+            if args.target_mask_mode == "train_allow_interpolated":
+                train_mask_src = build_valid_mask(shift, "allow_interpolated")
+                test_mask_src = build_valid_mask(shift, "observed_only")
+                mask_train = train_mask_src[:, :train_steps]
+                mask_test = test_mask_src[:, train_steps:]
+                valid_mask = np.concatenate([mask_train, mask_test], axis=1)
+            else:
+                valid_mask = build_valid_mask(shift, args.target_mask_mode)
+                mask_train = valid_mask[:, :train_steps]
+                mask_test = valid_mask[:, train_steps:]
+            print(
+                f"  shift={shift:<2} | "
+                f"train_valid={int(mask_train.sum()):>6} | "
+                f"test_valid={int(mask_test.sum()):>6} | "
+                f"total_valid={int(valid_mask.sum()):>6}"
+            )
+
+    train_loader, test_loader = get_dataloaders(
         root=args.root,
         feature=args.feature,
         egde_file=args.egde_file,
@@ -270,6 +386,7 @@ if __name__ == "__main__":
         k=args.k,
         batch_size=args.batch_size,
         shift=args.shift,
+        target_mask_mode=args.target_mask_mode,
         feat_norm=not args.no_feat_norm,
         window_size=args.window_size,
     )

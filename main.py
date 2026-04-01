@@ -24,7 +24,7 @@ def str2bool(value):
     raise argparse.ArgumentTypeError(f"Expected a boolean value, got '{value}'.")
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
+def train_one_epoch(model, dataloader, criterion, optimizer, device, predict_last=False):
     model.train()
     total_loss = 0.0
     for inputs, targets, y_mask, _, _ in tqdm(dataloader, desc="Training"):
@@ -33,6 +33,10 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
 
         optimizer.zero_grad()
         outputs = model(inputs)
+        if predict_last:
+            outputs = outputs[:, -1:, :]
+            targets = targets[:, -1:, :]
+            y_mask = y_mask[:, -1:, :]
         loss = criterion(outputs, targets, y_mask)
         loss.backward()
         optimizer.step()
@@ -41,7 +45,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
     return total_loss / len(dataloader)
 
 
-def evaluate(model, dataloader, criterion, device):
+def evaluate(model, dataloader, criterion, device, predict_last=False):
     model.eval()
     all_preds = []
     all_targets = []
@@ -54,6 +58,10 @@ def evaluate(model, dataloader, criterion, device):
             y_mask = y_mask.to(device).float()
 
             outputs = model(inputs)
+            if predict_last:
+                outputs = outputs[:, -1:, :]
+                targets = targets[:, -1:, :]
+                y_mask = y_mask[:, -1:, :]
             loss = criterion(outputs, targets, y_mask)
             total_loss += loss.item()
 
@@ -102,9 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--egde-file", type=str, default="graph_link_200m/links.txt")
     parser.add_argument("--ts-test", type=int, default=25)
     parser.add_argument("--shift", type=int, default=1)
+    parser.add_argument(
+        "--target-mask-mode",
+        type=str,
+        choices=("observed_only", "allow_interpolated", "train_allow_interpolated"),
+        default="observed_only",
+        help="Whether to use only observed targets, allow interpolated targets for both train/test, or allow them only in train.",
+    )
     parser.add_argument("--feat-norm", type=str2bool, default=True, help="Whether to apply train-set min-max scaling to [-1, 1].")
     parser.add_argument("--num-hops", type=int, default=0)
     parser.add_argument("--window-size", type=int, default=12)
+    parser.add_argument(
+        "--predict-last",
+        type=str2bool,
+        default=False,
+        help="Whether to train/evaluate only on the last timestep in each input window.",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--mlp-layers", type=int, default=2)
@@ -179,6 +200,7 @@ def main() -> None:
         k=args.num_hops,
         batch_size=args.batch_size,
         shift=args.shift,
+        target_mask_mode=args.target_mask_mode,
         feat_norm=args.feat_norm,
         window_size=args.window_size,
     )
@@ -199,7 +221,7 @@ def main() -> None:
 
     criterion = MaskedMSELoss().to(device)
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
@@ -210,13 +232,26 @@ def main() -> None:
     best_metrics = None
     rmse = mae = mape = r2 = np.nan
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            predict_last=args.predict_last,
+        )
         log_dict = {
             "epoch": epoch,
             "train_loss": train_loss,
         }
         if epoch % args.eval_interval == 0 or epoch == args.epochs:
-            test_loss, rmse, mae, mape, r2 = evaluate(model, test_loader, criterion, device)
+            test_loss, rmse, mae, mape, r2 = evaluate(
+                model,
+                test_loader,
+                criterion,
+                device,
+                predict_last=args.predict_last,
+            )
             print(
                 f"Epoch {epoch:02d} | Train Loss: {train_loss:.6f} | "
                 f"Test Loss: {test_loss:.6f} | RMSE: {rmse:.4f} | "
