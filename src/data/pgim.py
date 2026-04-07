@@ -85,9 +85,11 @@ def build_hop_tensor(features: np.ndarray, g: dgl.DGLGraph, num_hops: int) -> np
     return all_hops.transpose(2, 0, 1, 3)
 
 
-def collect_valid_positions(mask: np.ndarray, offset: int = 0):
+def collect_valid_positions(mask: np.ndarray, offset: int = 0, min_time_idx: int = 0):
     nodes, times = np.where(mask > 0)
-    return list(zip(nodes.tolist(), (times + offset).tolist()))
+    global_times = times + offset
+    valid = global_times >= min_time_idx
+    return list(zip(nodes[valid].tolist(), global_times[valid].tolist()))
 
 
 class WindowedNodeDataset(Dataset):
@@ -112,22 +114,15 @@ class WindowedNodeDataset(Dataset):
     def __getitem__(self, idx):
         node_idx, time_idx = self.valid_positions[idx]
         start = time_idx - self.window_size + 1
+        if start < 0:
+            raise IndexError(
+                f"Encountered incomplete history window for node={node_idx}, time_idx={time_idx}, "
+                f"window_size={self.window_size}. Valid positions should ensure time_idx >= {self.window_size - 1}."
+            )
 
-        if start >= 0:
-            window = self.hop_features[node_idx, start : time_idx + 1]
-            y_window = self.targets[node_idx, start : time_idx + 1]
-            mask_window = self.masks[node_idx, start : time_idx + 1]
-        else:
-            pad_len = -start
-            pad = np.zeros((pad_len, self.num_hops, self.feat_dim), dtype=self.hop_features.dtype)
-            cur = self.hop_features[node_idx, 0 : time_idx + 1]
-            window = np.concatenate([pad, cur], axis=0)
-            y_pad = np.zeros((pad_len,), dtype=self.targets.dtype)
-            mask_pad = np.zeros((pad_len,), dtype=self.masks.dtype)
-            y_cur = self.targets[node_idx, 0 : time_idx + 1]
-            mask_cur = self.masks[node_idx, 0 : time_idx + 1]
-            y_window = np.concatenate([y_pad, y_cur], axis=0)
-            mask_window = np.concatenate([mask_pad, mask_cur], axis=0)
+        window = self.hop_features[node_idx, start : time_idx + 1]
+        y_window = self.targets[node_idx, start : time_idx + 1]
+        mask_window = self.masks[node_idx, start : time_idx + 1]
 
         x = window.transpose(1, 0, 2)  # (K+1, window_size, feat_dim)
         y = y_window[:, None]  # (window_size, 1)
@@ -265,8 +260,9 @@ def get_dataloaders(
     full_hops = build_hop_tensor(x_full, g, k)
     train_hops = full_hops[:, :train_steps]
 
-    train_positions = collect_valid_positions(mask_train)
-    test_positions = collect_valid_positions(mask_test, offset=train_steps)
+    min_time_idx = window_size - 1
+    train_positions = collect_valid_positions(mask_train, min_time_idx=min_time_idx)
+    test_positions = collect_valid_positions(mask_test, offset=train_steps, min_time_idx=min_time_idx)
 
     train_ds = WindowedNodeDataset(train_hops, y_train, mask_train, train_positions, window_size)
     test_ds = WindowedNodeDataset(full_hops, y_full, full_mask, test_positions, window_size)
