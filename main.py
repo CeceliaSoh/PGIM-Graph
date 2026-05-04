@@ -203,6 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--run-name-sufix", type=str, default="")
     parser.add_argument(
         "--tracked-indices",
         type=int,
@@ -232,15 +233,27 @@ def main() -> None:
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    run_name = (
-        f"hop{args.num_hops}_"
-        f"lr{args.learning_rate}_"
-        f"wd{args.weight_decay}_"
-        f"head{args.num_heads}_"
-        f"layer{args.num_layers}_"
-        f"ts{args.window_size}_"
-        f"{timestamp}"
-    )
+    if args.run_name_sufix:
+        run_name = (
+            f"hop{args.num_hops}_"
+            f"lr{args.learning_rate}_"
+            f"wd{args.weight_decay}_"
+            f"head{args.num_heads}_"
+            f"layer{args.num_layers}_"
+            f"ts{args.window_size}_"
+            f"{args.run_name_sufix}_"
+            f"{timestamp}"
+        )
+    else:
+        run_name = (
+            f"hop{args.num_hops}_"
+            f"lr{args.learning_rate}_"
+            f"wd{args.weight_decay}_"
+            f"head{args.num_heads}_"
+            f"layer{args.num_layers}_"
+            f"ts{args.window_size}_"
+            f"{timestamp}"
+        )
     checkpoint_dir = args.checkpoint_dir / args.wandb_project
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_model_path = checkpoint_dir / f"{run_name}_best.pt"

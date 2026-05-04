@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 
 
-TIME_STEP_DIR = Path("dataset/ccr/timesteps")
-OUTPUT_PATH = Path("dataset/ccr/feature.npy")
-METADATA_DIR = Path("dataset/ccr/feature_metadata")
+TIME_STEP_DIR = Path("dataset/ccr/timesteps_timesfm")
+OUTPUT_PATH = Path("dataset/ccr/feature_timesfm.npy")
+METADATA_DIR = Path("dataset/ccr/feature_metadata_timesfm")
 FEATURE_COLUMNS_PATH = METADATA_DIR / "feature_columns.txt"
 PROJECT_NAMES_PATH = METADATA_DIR / "project_names.txt"
 TIMESTAMPS_PATH = METADATA_DIR / "timestamps.txt"

@@ -314,3 +314,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# python data/preprocess_to_graph.py --rule distance_or_mrt_radius --distance-threshold-m 300
