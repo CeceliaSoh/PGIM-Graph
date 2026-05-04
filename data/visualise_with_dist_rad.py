@@ -13,9 +13,19 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT_CSV_PATH = (
     BASE_DIR / "dataset" / "URA_merged_ccr_project_coverage_check.csv"
 )
+DEFAULT_PROJECT_DISTANCE_THRESHOLD_M = 300.0
+DEFAULT_MRT_DISTANCE_THRESHOLD_M = 300.0
 DEFAULT_MRT_CSV_PATH = BASE_DIR / "dataset" / "mongodb_exports" / "Rail_Transport.csv"
-DEFAULT_OUTPUT_PATH = BASE_DIR / "dataset" / "singapore_project_dist_rad_map.png"
-DEFAULT_DISTANCE_THRESHOLD_M = 250.0
+DEFAULT_OUTPUT_PATH = (
+    BASE_DIR
+    / "dataset"
+    / (
+        "singapore_project_dist_rad_map_"
+        f"proj_{DEFAULT_PROJECT_DISTANCE_THRESHOLD_M:.0f}_"
+        f"mrt_{DEFAULT_MRT_DISTANCE_THRESHOLD_M:.0f}.png"
+    )
+)
+
 
 
 def load_project_file(project_csv_path: Path) -> pd.DataFrame:
@@ -188,13 +198,16 @@ def build_project_radius_edge_frame(
 
 
 def build_combined_edge_frame(
-    project_df: pd.DataFrame, mrt_df: pd.DataFrame, distance_threshold_m: float
+    project_df: pd.DataFrame,
+    mrt_df: pd.DataFrame,
+    project_distance_threshold_m: float,
+    mrt_distance_threshold_m: float,
 ) -> tuple[pd.DataFrame, int, int]:
     distance_edge_df = build_project_distance_edge_frame(
-        project_df, distance_threshold_m
+        project_df, project_distance_threshold_m
     )
     mrt_radius_edge_df = build_project_radius_edge_frame(
-        project_df, mrt_df, distance_threshold_m
+        project_df, mrt_df, mrt_distance_threshold_m
     )
 
     combined_edge_df = pd.concat(
@@ -216,7 +229,11 @@ def build_combined_edge_frame(
 
 
 def build_map_figure(
-    project_df: pd.DataFrame, mrt_df: pd.DataFrame, edge_df: pd.DataFrame, distance_threshold_m: float
+    project_df: pd.DataFrame,
+    mrt_df: pd.DataFrame,
+    edge_df: pd.DataFrame,
+    mrt_distance_threshold_m: float,
+    project_distance_threshold_m: float,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(14, 14))
     fig.patch.set_facecolor("white")
@@ -225,8 +242,8 @@ def build_map_figure(
     lat_mean = float(project_df["latitude"].mean())
     meters_per_degree_lat = 111320.0
     meters_per_degree_lon = 111320.0 * np.cos(np.radians(lat_mean))
-    radius_lon_deg = distance_threshold_m / meters_per_degree_lon
-    radius_lat_deg = distance_threshold_m / meters_per_degree_lat
+    radius_lon_deg = mrt_distance_threshold_m / meters_per_degree_lon
+    radius_lat_deg = mrt_distance_threshold_m / meters_per_degree_lat
 
     for row in mrt_df.itertuples(index=False):
         radius_circle = Circle(
@@ -297,15 +314,41 @@ def build_map_figure(
     lon_half_range = max(0.002, 2.0 * lon_std)
     lat_half_range = max(0.002, 2.0 * lat_std)
 
-    ax.set_xlim(lon_mean - lon_half_range, lon_mean + lon_half_range)
-    ax.set_ylim(lat_mean - lat_half_range, lat_mean + lat_half_range)
+    lon_min = lon_mean - lon_half_range
+    lon_max = lon_mean + lon_half_range
+    lat_min = lat_mean - lat_half_range
+    lat_max = lat_mean + lat_half_range
+
+    ax.set_xlim(lon_min, lon_max)
+    ax.set_ylim(lat_min, lat_max)
+
+    visible_mrt_df = mrt_df[
+        mrt_df["longitude"].between(lon_min, lon_max)
+        & mrt_df["latitude"].between(lat_min, lat_max)
+    ]
+
+    for row in visible_mrt_df.itertuples(index=False):
+        ax.text(
+            row.longitude,
+            row.latitude,
+            str(row.station_name_english),
+            fontsize=7,
+            color="#123b63",
+            ha="left",
+            va="bottom",
+            alpha=0.9,
+            zorder=5,
+            bbox={"facecolor": "white", "alpha": 0.6, "edgecolor": "none", "pad": 1.0},
+        )
 
     ax.text(
         0.01,
         0.98,
         (
             f"Projects: {len(project_df)} | MRT: {len(mrt_df)} | "
-            f"Edges: {len(edge_df)} | Threshold: {distance_threshold_m:.0f}m"
+            f"Visible MRT labels: {len(visible_mrt_df)} | Edges: {len(edge_df)} | "
+            f"Project threshold: {project_distance_threshold_m:.0f}m | "
+            f"MRT threshold: {mrt_distance_threshold_m:.0f}m"
         ),
         transform=ax.transAxes,
         fontsize=10,
@@ -313,7 +356,6 @@ def build_map_figure(
         ha="left",
         bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
     )
-
     return fig
 
 
@@ -343,10 +385,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to save the generated map image.",
     )
     parser.add_argument(
-        "--distance-threshold-m",
+        "--project-distance-threshold-m",
         type=float,
-        default=DEFAULT_DISTANCE_THRESHOLD_M,
-        help="Distance threshold in meters for both direct links and MRT-radius links.",
+        default=DEFAULT_PROJECT_DISTANCE_THRESHOLD_M,
+        help="Distance threshold in meters for direct project-to-project links.",
+    )
+    parser.add_argument(
+        "--mrt-distance-threshold-m",
+        type=float,
+        default=DEFAULT_MRT_DISTANCE_THRESHOLD_M,
+        help="Distance threshold in meters for linking projects through the same MRT radius.",
     )
     parser.add_argument(
         "--show",
@@ -368,18 +416,30 @@ def main() -> int:
     print(f"Found {len(mrt_df)} unique MRT stations with valid coordinates.")
 
     edge_df, distance_edge_count, mrt_radius_edge_count = build_combined_edge_frame(
-        project_df, mrt_df, args.distance_threshold_m
+        project_df,
+        mrt_df,
+        args.project_distance_threshold_m,
+        args.mrt_distance_threshold_m,
     )
     print(
-        f"Built {len(edge_df)} unique project-to-project edges using a threshold of "
-        f"{args.distance_threshold_m:.0f} meters."
+        f"Built {len(edge_df)} unique project-to-project edges using "
+        f"{args.project_distance_threshold_m:.0f}m for direct project links and "
+        f"{args.mrt_distance_threshold_m:.0f}m for MRT-radius links."
     )
     print(
-        f"Direct distance edges: {distance_edge_count} | "
-        f"MRT-radius edges: {mrt_radius_edge_count}"
+        f"Direct distance edges: {distance_edge_count} "
+        f"(threshold {args.project_distance_threshold_m:.0f}m) | "
+        f"MRT-radius edges: {mrt_radius_edge_count} "
+        f"(threshold {args.mrt_distance_threshold_m:.0f}m)"
     )
 
-    fig = build_map_figure(project_df, mrt_df, edge_df, args.distance_threshold_m)
+    fig = build_map_figure(
+        project_df,
+        mrt_df,
+        edge_df,
+        args.mrt_distance_threshold_m,
+        args.project_distance_threshold_m,
+    )
 
     args.output_file.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output_file, dpi=200, bbox_inches="tight")
