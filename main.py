@@ -95,7 +95,7 @@ def evaluate(model, dataloader, criterion, device, predict_last=False, selected_
     selected_indices = sorted(set(selected_indices))
 
     with torch.no_grad():
-        for inputs, targets, y_mask, _, _ in dataloader:
+        for inputs, targets, y_mask, _, _ in tqdm(dataloader, desc="Evaluating", leave=False):
             inputs = inputs.to(device)
             targets = targets.to(device)
             y_mask = y_mask.to(device).float()
@@ -171,11 +171,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train a GNNRegressor on the PGIM dataset with SIGN-style precomputed hop features.",
     )
-    parser.add_argument("--root", type=Path, default=Path("dataset/ccr"))
-    parser.add_argument("--feature", type=str, default="feature.npy")
+    parser.add_argument("--root", type=Path, default=Path("database_v3/Graph_Size"))
     parser.add_argument("--egde-file", type=str, default="graph_link_200m/links.txt")
+    parser.add_argument("--ccr", type=str2bool, default=True, help="Whether to load only node IDs listed in node_id_ccr.csv.")
+    parser.add_argument("--nodes-dir", type=str, default="nodes")
+    parser.add_argument("--edges-dir", type=str, default="edges")
+    parser.add_argument("--macro-file", type=str, default="macro_data_processed.csv")
+    parser.add_argument("--ccr-node-file", type=str, default="node_id_ccr.csv")
+    parser.add_argument(
+        "--graph-edge-files",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Graph edge CSV files under --edges-dir. Defaults to the four database_v3 graph types.",
+    )
     parser.add_argument("--ts-test", type=int, default=25)
-    parser.add_argument("--shift", type=int, default=1)
+    parser.add_argument(
+        "--shift",
+        type=int,
+        default=1,
+        help="Macro-data lag in months. Targets stay at the same timestep; macro columns use timestep - shift.",
+    )
     parser.add_argument(
         "--target-mask-mode",
         type=str,
@@ -183,7 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="observed_only",
         help="Whether to use only observed targets, allow interpolated targets for both train/test, or allow them only in train.",
     )
-    parser.add_argument("--feat-norm", type=str2bool, default=True, help="Whether to apply train-set min-max scaling to [-1, 1].")
+    parser.add_argument(
+        "--feat-norm",
+        type=str2bool,
+        default=False,
+        help="Whether to apply train-set min-max scaling to [-1, 1]. Defaults to false because node CSV features are already normalized.",
+    )
     parser.add_argument("--num-hops", type=int, default=0)
     parser.add_argument("--window-size", type=int, default=12)
     parser.add_argument(
@@ -269,6 +290,11 @@ def main() -> None:
             "num_layers": args.num_layers,
             "mlp_layers": args.mlp_layers,
             "window_size": args.window_size,
+            "ccr": args.ccr,
+            "nodes_dir": args.nodes_dir,
+            "edges_dir": args.edges_dir,
+            "macro_file": args.macro_file,
+            "graph_edge_files": args.graph_edge_files,
             "batch_size": args.batch_size,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
@@ -280,7 +306,6 @@ def main() -> None:
 
     train_loader, test_loader = get_dataloaders(
         root=str(args.root),
-        feature=args.feature,
         egde_file=args.egde_file,
         ts_test=args.ts_test,
         k=args.num_hops,
@@ -289,13 +314,24 @@ def main() -> None:
         target_mask_mode=args.target_mask_mode,
         feat_norm=args.feat_norm,
         window_size=args.window_size,
+        ccr=args.ccr,
+        nodes_dir=args.nodes_dir,
+        edges_dir=args.edges_dir,
+        macro_file=args.macro_file,
+        ccr_node_file=args.ccr_node_file,
+        graph_edge_files=args.graph_edge_files,
     )
 
     sample_inputs, _, _, _, _ = next(iter(train_loader))
-    _, num_hops, _, feat_dim = sample_inputs.shape
+    if sample_inputs.ndim == 5:
+        _, _, num_graphs, num_hops, feat_dim = sample_inputs.shape
+    else:
+        _, num_hops, _, feat_dim = sample_inputs.shape
+        num_graphs = 1
 
     model = GNNRegressor(
         num_hops=num_hops,
+        num_graphs=num_graphs,
         feat_dim=feat_dim,
         hidden_dim=args.hidden_dim,
         out_dim=1,

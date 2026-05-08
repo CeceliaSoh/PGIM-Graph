@@ -129,20 +129,24 @@ class CausalTransformerLayer(nn.Module):
 class GNNRegressor(nn.Module):
     """
     Full spatial-temporal regressor:
-      1. Per-hop MLP encodes each GNN hop independently.
-      2. Mean pool across hops  →  (batch, T, hidden_dim).
-      3. Causal Transformer layers model temporal dependencies (GPT-style).
-      4. Linear head  →  next-step price prediction at every token.
+      1. Per-hop MLP encodes each graph hop independently.
+      2. Mean pool across hops  →  (batch, T, num_graphs, hidden_dim).
+      3. Per-graph MLP encodes each graph type independently.
+      4. Mean pool across graphs  →  (batch, T, hidden_dim).
+      5. Causal Transformer layers model temporal dependencies (GPT-style).
+      6. Linear head  →  next-step price prediction at every token.
 
-    Input:  (batch, num_hops, T, feat_dim)
+    Input:  (batch, T, num_graphs, num_hops, feat_dim)
     Output: (batch, T, out_dim)
     """
 
     def __init__(self, num_hops: int, feat_dim: int, hidden_dim: int, out_dim: int,
                  mlp_layers: int = 1, num_transformer_layers: int = 2,
-                 heads: int = 4, dropout: float = 0.1):
+                 heads: int = 4, dropout: float = 0.1, num_graphs: int = 1):
         super().__init__()
 
+        self.num_hops = num_hops
+        self.num_graphs = num_graphs
         units_list = [hidden_dim] * mlp_layers
 
         # --- spatial encoder (one MLP per hop) ---
@@ -160,6 +164,20 @@ class GNNRegressor(nn.Module):
             for _ in range(num_hops)
         ])
 
+        self.graph_mlps = nn.ModuleList([
+            MyMLP(
+                in_channels=hidden_dim,
+                units_list=units_list,
+                activation="relu",
+                drop_rate=dropout,
+                bn=False,
+                output_activation=None,
+                output_drop_rate=0.0,
+                output_bn=False,
+            )
+            for _ in range(num_graphs)
+        ])
+
         # --- temporal encoder ---
         self.transformer_layers = nn.ModuleList([
             CausalTransformerLayer(hidden_dim, heads, dropout)
@@ -171,22 +189,37 @@ class GNNRegressor(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (batch, num_hops, T, feat_dim)
+            x: (batch, T, num_graphs, num_hops, feat_dim)
         Returns:
             (batch, T, out_dim)
         """
-        batch, num_hops, T, feat_dim = x.shape
+        if x.ndim == 4:
+            x = x.permute(0, 2, 1, 3).unsqueeze(2)
+        batch, T, num_graphs, num_hops, feat_dim = x.shape
+        if num_hops != self.num_hops:
+            raise ValueError(f"Expected {self.num_hops} hops, got {num_hops}")
+        if num_graphs != self.num_graphs:
+            raise ValueError(f"Expected {self.num_graphs} graphs, got {num_graphs}")
 
         # --- per-hop spatial encoding ---
         hop_outputs = []
         for i, mlp in enumerate(self.hop_mlps):
-            h = x[:, i, :, :].reshape(batch * T, feat_dim)   # (batch*T, feat_dim)
-            h = mlp(h)                                         # (batch*T, hidden_dim)
-            h = h.reshape(batch, T, -1)                        # (batch, T, hidden_dim)
+            h = x[:, :, :, i, :].reshape(batch * T * num_graphs, feat_dim)
+            h = mlp(h)
+            h = h.reshape(batch, T, num_graphs, -1)
             hop_outputs.append(h)
 
-        # mean pool over hops → (batch, T, hidden_dim)
-        pooled = torch.stack(hop_outputs, dim=1).mean(dim=1)
+        # mean pool over hops → (batch, T, num_graphs, hidden_dim)
+        pooled_hops = torch.stack(hop_outputs, dim=3).mean(dim=3)
+
+        graph_outputs = []
+        for i, mlp in enumerate(self.graph_mlps):
+            h = pooled_hops[:, :, i, :].reshape(batch * T, -1)
+            h = mlp(h)
+            h = h.reshape(batch, T, -1)
+            graph_outputs.append(h)
+
+        pooled = torch.stack(graph_outputs, dim=2).mean(dim=2)
 
         # add positional encoding
         pooled = pooled + _sinusoidal_pe(T, pooled.size(-1), pooled.device)

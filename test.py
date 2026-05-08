@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.data.pgim import WindowedNodeDataset, get_dataloaders
 from src.models.gnn_regressor import GNNRegressor
@@ -28,9 +30,14 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device):
 
 
 def build_model(checkpoint_args: dict, sample_inputs: torch.Tensor, device: torch.device) -> GNNRegressor:
-    _, num_hops, _, feat_dim = sample_inputs.shape
+    if sample_inputs.ndim == 5:
+        _, _, num_graphs, num_hops, feat_dim = sample_inputs.shape
+    else:
+        _, num_hops, _, feat_dim = sample_inputs.shape
+        num_graphs = 1
     model = GNNRegressor(
         num_hops=num_hops,
+        num_graphs=num_graphs,
         feat_dim=feat_dim,
         hidden_dim=checkpoint_args["hidden_dim"],
         out_dim=1,
@@ -60,15 +67,16 @@ def evaluate(
     total_loss = 0.0
 
     with torch.no_grad():
-        for inputs, targets, y_mask, _, _ in dataloader:
+        for inputs, targets, y_mask, _, _ in tqdm(dataloader, desc="Evaluating", leave=False):
             inputs = inputs.to(device)
             targets = targets.to(device)
             y_mask = y_mask.to(device).float()
 
             outputs = model(inputs)
-            outputs = outputs[:, -1:, :]
-            targets = targets[:, -1:, :]
-            y_mask = y_mask[:, -1:, :]
+            if predict_last:
+                outputs = outputs[:, -1:, :]
+                targets = targets[:, -1:, :]
+                y_mask = y_mask[:, -1:, :]
 
             loss = criterion(outputs, targets, y_mask)
             total_loss += loss.item()
@@ -139,7 +147,11 @@ def collect_prediction_rows(
     prediction_rows = []
 
     with torch.no_grad():
-        for inputs, targets, y_mask, node_indices, time_indices in dataloader:
+        for inputs, targets, y_mask, node_indices, time_indices in tqdm(
+            dataloader,
+            desc="Collecting predictions",
+            leave=False,
+        ):
             inputs = inputs.to(device)
             targets = targets.to(device)
             y_mask = y_mask.to(device).float()
@@ -154,24 +166,26 @@ def collect_prediction_rows(
             valid_mask_cpu = (y_mask > 0).detach().cpu()
             node_indices_cpu = node_indices.detach().cpu()
             time_indices_cpu = time_indices.detach().cpu()
-            window_size = inputs.shape[2]
+            window_size = inputs.shape[1] if inputs.ndim == 5 else inputs.shape[2]
 
             for batch_idx in range(outputs_cpu.shape[0]):
-                end_time_idx = int(time_indices_cpu[batch_idx].item())
-                window_start_idx = end_time_idx - window_size + 1
-                target_time_idx = end_time_idx + shift
-                if 0 <= target_time_idx < len(timestamps):
-                    target_timestamp = timestamps[int(target_time_idx)]
+                if inputs.ndim == 5:
+                    window_start_idx = int(time_indices_cpu[batch_idx].item())
+                    end_time_idx = window_start_idx + window_size - 1
                 else:
-                    target_timestamp = add_months(timestamps[end_time_idx], shift)
+                    end_time_idx = int(time_indices_cpu[batch_idx].item())
+                    window_start_idx = end_time_idx - window_size + 1
+                target_time_idx = end_time_idx
+                target_timestamp = label_at(timestamps, target_time_idx, "")
                 has_ground_truth = bool(valid_mask_cpu[batch_idx, 0, 0].item())
                 split = "train" if end_time_idx < test_start_idx else "test"
+                node_idx = int(node_indices_cpu[batch_idx].item())
 
                 prediction_rows.append({
                     "split": split,
-                    "project_name": project_names[int(node_indices_cpu[batch_idx].item())],
-                    "window_start_timestamp": timestamps[window_start_idx],
-                    "window_end_timestamp": timestamps[end_time_idx],
+                    "project_name": label_at(project_names, node_idx, str(node_idx)),
+                    "window_start_timestamp": label_at(timestamps, window_start_idx, ""),
+                    "window_end_timestamp": label_at(timestamps, end_time_idx, ""),
                     "target_timestamp": target_timestamp,
                     "prediction": float(outputs_cpu[batch_idx, 0, 0].item()),
                     "ground_truth": float(targets_cpu[batch_idx, 0, 0].item()) if has_ground_truth else "",
@@ -201,7 +215,6 @@ def resolve_checkpoints(checkpoint_path: Optional[Path], checkpoint_dir: Optiona
 def build_test_loader(train_args: dict, eval_window_size: int):
     train_loader, test_loader = get_dataloaders(
         root=str(train_args["root"]),
-        feature=train_args["feature"],
         egde_file=train_args["egde_file"],
         ts_test=train_args["ts_test"],
         k=train_args["num_hops"],
@@ -210,12 +223,20 @@ def build_test_loader(train_args: dict, eval_window_size: int):
         target_mask_mode=train_args["target_mask_mode"],
         feat_norm=train_args["feat_norm"],
         window_size=eval_window_size,
+        ccr=train_args.get("ccr", True),
+        nodes_dir=train_args.get("nodes_dir", "nodes"),
+        edges_dir=train_args.get("edges_dir", "edges"),
+        macro_file=train_args.get("macro_file", "macro_data_processed.csv"),
+        ccr_node_file=train_args.get("ccr_node_file", "node_id_ccr.csv"),
+        graph_edge_files=train_args.get("graph_edge_files"),
     )
     return train_loader, test_loader
 
 
 def build_prediction_loader(test_loader, batch_size: int):
     base_dataset = test_loader.dataset
+    if not all(hasattr(base_dataset, attr) for attr in ("total_steps", "num_nodes")):
+        return DataLoader(base_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     min_time_idx = base_dataset.window_size - 1
     all_positions = [
         (node_idx, time_idx)
@@ -240,27 +261,48 @@ def format_metric(value):
     return f"{value:.6f}"
 
 
-def resolve_metadata_dir(root: str, feature: str) -> Path:
-    feature_stem = Path(feature).stem
-    if not feature_stem.startswith("feature"):
-        return Path(root) / "feature_metadata"
-    suffix = feature_stem[len("feature") :]
-    return Path(root) / f"feature_metadata{suffix}"
-
-
-def load_dataset_labels(root: str, feature: str):
-    metadata_dir = resolve_metadata_dir(root, feature)
+def load_dataset_labels(root: str):
+    root_path = Path(root)
+    metadata_dir = root_path / "feature_metadata"
     project_names_path = metadata_dir / "project_names.txt"
     timestamps_path = metadata_dir / "timestamps.txt"
 
-    if not project_names_path.is_file():
-        raise FileNotFoundError(f"Project names metadata not found: {project_names_path}")
-    if not timestamps_path.is_file():
-        raise FileNotFoundError(f"Timestamps metadata not found: {timestamps_path}")
+    if project_names_path.is_file() and timestamps_path.is_file():
+        project_names = project_names_path.read_text(encoding="utf-8").splitlines()
+        timestamps = timestamps_path.read_text(encoding="utf-8").splitlines()
+        return project_names, timestamps
 
-    project_names = project_names_path.read_text(encoding="utf-8").splitlines()
-    timestamps = timestamps_path.read_text(encoding="utf-8").splitlines()
+    node_id_path = root_path / "node_id.csv"
+    if not node_id_path.is_file():
+        raise FileNotFoundError(f"Project id metadata not found: {node_id_path}")
+    node_ids = pd.read_csv(node_id_path)
+    if not {"node_id", "project_id"}.issubset(node_ids.columns):
+        raise ValueError(f"Expected node_id and project_id columns in {node_id_path}")
+
+    node_ids["node_id"] = pd.to_numeric(node_ids["node_id"], errors="coerce")
+    node_ids["project_id"] = pd.to_numeric(node_ids["project_id"], errors="coerce")
+    node_ids = node_ids.dropna(subset=["node_id", "project_id"])
+    max_node_id = int(node_ids["node_id"].max()) if not node_ids.empty else -1
+    project_names = [str(idx) for idx in range(max_node_id + 1)]
+    for row in node_ids.itertuples(index=False):
+        project_names[int(row.node_id)] = str(int(row.project_id))
+
+    macro_path = root_path.parent / "macro_data_processed.csv"
+    if not macro_path.is_file():
+        raise FileNotFoundError(f"Timestamp metadata not found: {macro_path}")
+    macro_frame = pd.read_csv(macro_path)
+    if "Lease Commencement Date" not in macro_frame.columns:
+        raise ValueError(f"Expected Lease Commencement Date column in {macro_path}")
+    if "timestep" in macro_frame.columns:
+        macro_frame = macro_frame.sort_values("timestep")
+    timestamps = macro_frame["Lease Commencement Date"].astype(str).tolist()
     return project_names, timestamps
+
+
+def label_at(labels, idx: int, default: str) -> str:
+    if 0 <= int(idx) < len(labels):
+        return labels[int(idx)]
+    return default
 
 
 def add_months(timestamp_str: str, months: int) -> str:
@@ -325,14 +367,16 @@ def evaluate_checkpoint(
     train_args = checkpoint["args"]
     project_names, timestamps = load_dataset_labels(
         root=str(train_args["root"]),
-        feature=train_args["feature"],
     )
 
     train_loader, test_loader = build_test_loader(train_args, eval_window_size)
     prediction_loader = build_prediction_loader(test_loader, batch_size=int(train_args["batch_size"]))
     sample_inputs, _, _, _, _ = next(iter(train_loader))
-    total_steps = test_loader.dataset.total_steps
-    test_start_idx = total_steps - int(train_args["ts_test"])
+    test_start_idx = getattr(
+        test_loader.dataset,
+        "train_cutoff",
+        len(timestamps) - int(train_args["ts_test"]),
+    )
 
     model = build_model(train_args, sample_inputs, device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -421,7 +465,7 @@ def main():
     print(f"Evaluating {len(checkpoints)} checkpoint(s) with eval window size = {args.eval_window_size}")
     print(f"Acc@tol uses tolerance = {args.accuracy_tolerance * 100:.2f}% relative error\n")
 
-    for checkpoint_path in checkpoints:
+    for checkpoint_path in tqdm(checkpoints, desc="Evaluating checkpoints"):
         result = evaluate_checkpoint(
             checkpoint_path=checkpoint_path,
             eval_window_size=args.eval_window_size,

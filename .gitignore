@@ -225,3 +225,5 @@ checkpoints/
 wandb/
 
 .codex
+
+database*

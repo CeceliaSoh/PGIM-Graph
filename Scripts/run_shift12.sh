@@ -1,50 +1,67 @@
-CUDA_VISIBLE_DEVICES=4 python /home/cecelia/project/PGIM-Graph/main.py \
-  --root /home/cecelia/project/PGIM-Graph/dataset/ccr \
-  --feature feature_timesfm.npy \
-  --egde-file graph_link_300m/links.txt \
+CUDA_VISIBLE_DEVICES=7 python main.py \
+  --root "database_v3/Graph_Size" \
+  --ccr true \
+  --nodes-dir nodes \
+  --edges-dir edges \
+  --macro-file macro_data_v1_processed.csv \
+  --ccr-node-file node_id_ccr.csv \
+  --graph-edge-files \
+    dist_250.csv \
+    mrt_cir_500.csv \
+    mrt_nearest_dist_eps_1.csv \
+    same_condo_age_2026.csv \
+  --ts-test 25 \
+  --shift 12 \
   --num-hops 3 \
   --window-size 12 \
-  --feat-norm true \
-  --learning-rate 1e-4 \
-  --weight-decay 1e-2 \
-  --batch-size 256 \
-  --dropout 0.2 \
-  --shift 12 \
   --predict-last false \
-  --target-mask-mode train_allow_interpolated \
-  --wandb-project pgim-mask-trans-shift12-exp \
-  --run-name-sufix dist300_timesfm
+  --target-mask-mode observed_only \
+  --feat-norm false \
+  --batch-size 256 \
+  --hidden-dim 64 \
+  --mlp-layers 2 \
+  --num-layers 2 \
+  --num-heads 4 \
+  --dropout 0.3 \
+  --epochs 100 \
+  --eval-interval 1 \
+  --learning-rate 1e-4 \
+  --weight-decay 5e-2 \
+  --tracked-indices 0 6 11 \
+  --wandb-project pgim-graph-v3-shift12_new_size \
+  --run-name-sufix ccr_multigraph_macro_lag12_73_obs \
+  --ts-test 73
 
-CUDA_VISIBLE_DEVICES=6 python /home/cecelia/project/PGIM-Graph/main.py \
-  --root /home/cecelia/project/PGIM-Graph/dataset/ccr \
-  --feature feature.npy \
-  --egde-file graph_link_300m/links.txt \
+  CUDA_VISIBLE_DEVICES=7 python main.py \
+  --root "database_v3/Graph_Size" \
+  --ccr true \
+  --nodes-dir nodes \
+  --edges-dir edges \
+  --macro-file macro_data_v1_processed.csv \
+  --ccr-node-file node_id_ccr.csv \
+  --graph-edge-files \
+    dist_250.csv \
+  --ts-test 25 \
+  --shift 12 \
   --num-hops 3 \
   --window-size 12 \
-  --feat-norm true \
-  --learning-rate 1e-4 \
-  --weight-decay 1e-2 \
-  --batch-size 256 \
-  --dropout 0.2 \
-  --shift 12 \
   --predict-last false \
   --target-mask-mode train_allow_interpolated \
-  --wandb-project pgim-mask-trans-shift12-exp \
-  --run-name-sufix dist300
+  --feat-norm false \
+  --batch-size 256 \
+  --hidden-dim 64 \
+  --mlp-layers 2 \
+  --num-layers 2 \
+  --num-heads 4 \
+  --dropout 0.2 \
+  --epochs 100 \
+  --eval-interval 1 \
+  --learning-rate 1e-4 \
+  --weight-decay 1e-2 \
+  --tracked-indices 0 6 11 \
+  --wandb-project pgim-graph-v3-shift12_new \
+  --run-name-sufix ccr_multigraph_macro_lag12_73_1Graph \
+  --ts-test 73
 
-CUDA_VISIBLE_DEVICES=6 python /home/cecelia/project/PGIM-Graph/main.py \
-  --root /home/cecelia/project/PGIM-Graph/dataset/ccr \
-  --feature feature.npy \
-  --egde-file graph_link_250m_distance_or_mrt_radius/links.txt \
-  --num-hops 3 \
-  --window-size 12 \
-  --feat-norm true \
-  --learning-rate 1e-4 \
-  --weight-decay 1e-2 \
-  --batch-size 256 \
-  --dropout 0.2 \
-  --shift 12 \
-  --predict-last false \
-  --target-mask-mode train_allow_interpolated \
-  --wandb-project pgim-mask-trans-shift12-exp \
-  --run-name-sufix dist250mrt
+
+# GPU=6 Scripts/run_shift12.sh
