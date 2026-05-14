@@ -1,0 +1,41 @@
+input_folder: dataset/V260506.csv
+output_folder: dataset/database_260513
+
+timestep: month_idx
+node_id: project_idx
+project_id: condo_name
+rent_per_sqft: rent_psf_imp
+y_mask: was_observed
+
+max_clip_col: []
+max_clip_glo: ["dist", "School", "Institution"]
+
+as_feat:
+  - timestep
+  - node_id
+  - rent_per_sqft
+
+to_drop:
+  - is_post_cutoff
+  - rent_psf_obs
+  - date
+
+categorical:
+  - district
+  - size_tier
+  - size_label
+  - segment
+  - Planning Area
+  - Neighbourhood
+  - nearest_mrt_name
+  - nearest_school_name
+
+first_few:
+  - timestep
+  - node_id
+  - project_id
+
+last_few:
+  - rent_per_sqft_feat
+  - rent_per_sqft
+  - y_mask
