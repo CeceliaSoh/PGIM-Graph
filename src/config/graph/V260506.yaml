@@ -1,0 +1,76 @@
+name: V260506
+
+io_paths:
+  input_path: dataset/V260506.csv
+  output_folder: dataset/database_260514
+  project_info_filename: project_info
+  timestep_info_filename: timestep_info
+  node_id_filename: node_id
+  project_node_filename: project_level_node
+  size_node_filename: size_level_node
+  data_file_ext: .csv
+  standardisation_file: stand.json
+  normalisation01_file: norm0.json
+  normalisation11_file: norm1.json
+
+overwrite: false
+
+rename:
+  node_id: project_idx
+  project_name: condo_name
+  project_id: condo_name
+  timestep: month_idx
+  date: date
+  rent_per_sqft: rent_psf_obs
+  rent_per_sqft_imp: rent_psf_imp
+  y_mask: was_observed
+
+standard_cols: ["node_id", "project_id", "project_name", "timestep", "date", "size_tier", "rent_per_sqft", "y_mask"]
+
+project_info:
+  cols: ["project_id", "project_name", "latitude", "longitude"]
+  other_feat: false
+  to_drop: []
+  first_few: ["project_id", "project_name"]
+  last_few: []
+  sort_by: ["project_id"]
+
+timestep_info:
+  cols: ["timestep", "date"]
+  other_feat: false
+  to_drop: []
+  first_few: ["timestep", "date"]
+  last_few: []
+  sort_by: ["timestep"]
+
+
+form_project_node:
+  to_drop: ["size_tier", "rent_per_sqft_imp", "y_mask", "date", "project_name"]
+  group_by: ["project_id", "timestep"]
+
+reindex_node_id:
+  group_by: ["project_id", "size_tier"]
+  sort_by: ["project_id", "size_tier"]
+
+size_node:
+  cols: ["node_id", "project_id", "timestep", "rent_per_sqft", "rent_per_sqft_imp", "y_mask"]
+  other_feat: false
+  categorical: ["size_tier"] # default using duplicated col for one-hot
+  as_feat: ["project_id", "timestep", "rent_per_sqft"] # new col_name "{original_col_name}_feat"
+  to_drop: []
+  no_norm: ["node_id", "project_id", "timestep","rent_per_sqft", "y_mask"] # these col will not be stored for the stand/normalisation
+  first_few: ["node_id", "project_id", "timestep"]
+  last_few: ["rent_per_sqft_imp", "rent_per_sqft", "y_mask"]
+  sort_by: ["node_id", "project_id", "timestep"]
+  
+
+project_node:
+  cols: []
+  other_feat: true
+  max_clip_glo: ["_dist", "School", "Institution"]
+  as_feat: ["timestep", "node_id", "rent_per_sqft"]
+  to_drop: ["is_post_cutoff", "date", "project_name", "rent_per_sqft_imp"]
+  categorical: ["district", "size_tier", "size_label", "segment", "Planning Area", "Neighbourhood", "nearest_mrt_name", "nearest_school_name"]
+  first_few: ["timestep", "node_id", "project_id"]
+  last_few: ["rent_per_sqft", "y_mask"]
+  sort_by: ["node_id", "project_id", "timestep"]

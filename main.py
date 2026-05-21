@@ -169,9 +169,9 @@ def evaluate(model, dataloader, criterion, device, predict_last=False, selected_
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train a GNNRegressor on the PGIM dataset with SIGN-style precomputed hop features.",
+        description="Train an RpHGNN-style temporal regressor on database_260519.",
     )
-    parser.add_argument("--root", type=Path, default=Path("database_v3/Graph_Size"))
+    parser.add_argument("--root", type=Path, default=Path("dataset/database_260519"))
     parser.add_argument("--egde-file", type=str, default="graph_link_200m/links.txt")
     parser.add_argument("--ccr", type=str2bool, default=True, help="Whether to load only node IDs listed in node_id_ccr.csv.")
     parser.add_argument("--nodes-dir", type=str, default="nodes")
@@ -183,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         default=None,
-        help="Graph edge CSV files under --edges-dir. Defaults to the four database_v3 graph types.",
+        help="Graph edge CSV files under the database_260519 edges directory.",
     )
     parser.add_argument("--ts-test", type=int, default=25)
     parser.add_argument(
@@ -195,17 +195,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-mask-mode",
         type=str,
-        choices=("observed_only", "allow_interpolated", "train_allow_interpolated"),
+        choices=("all", "observed_only", "train_all_test_observed"),
         default="observed_only",
-        help="Whether to use only observed targets, allow interpolated targets for both train/test, or allow them only in train.",
+        help="Use all imputed targets, observed-only targets, or all train targets with observed-only test metrics.",
     )
+    parser.add_argument("--target-col", type=str, default="rent_per_sqft_imp")
+    parser.add_argument("--mask-col", type=str, default="y_mask")
     parser.add_argument(
         "--feat-norm",
         type=str2bool,
-        default=False,
-        help="Whether to apply train-set min-max scaling to [-1, 1]. Defaults to false because node CSV features are already normalized.",
+        default=True,
+        help="Whether to apply train-set min-max scaling to [-1, 1] before random projection.",
     )
-    parser.add_argument("--num-hops", type=int, default=0)
+    parser.add_argument("--num-hops", type=int, default=2)
     parser.add_argument("--window-size", type=int, default=12)
     parser.add_argument(
         "--predict-last",
@@ -218,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlp-layers", type=int, default=2)
     parser.add_argument("--num-layers", type=int, default=2, help="Number of causal transformer layers.")
     parser.add_argument("--num-heads", type=int, default=4)
+    parser.add_argument("--rp-dim", type=int, default=32, help="Random-projection dimension for heterogeneous node features.")
+    parser.add_argument("--conv-filters", type=int, default=2, help="RpHGNN group Conv1d filters.")
+    parser.add_argument("--merge-mode", type=str, choices=("concat", "mean"), default="concat")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--eval-interval", type=int, default=1)
@@ -290,6 +296,11 @@ def main() -> None:
             "num_layers": args.num_layers,
             "mlp_layers": args.mlp_layers,
             "window_size": args.window_size,
+            "target_col": args.target_col,
+            "target_mask_mode": args.target_mask_mode,
+            "rp_dim": args.rp_dim,
+            "conv_filters": args.conv_filters,
+            "merge_mode": args.merge_mode,
             "ccr": args.ccr,
             "nodes_dir": args.nodes_dir,
             "edges_dir": args.edges_dir,
@@ -312,6 +323,8 @@ def main() -> None:
         batch_size=args.batch_size,
         shift=args.shift,
         target_mask_mode=args.target_mask_mode,
+        target_col=args.target_col,
+        mask_col=args.mask_col,
         feat_norm=args.feat_norm,
         window_size=args.window_size,
         ccr=args.ccr,
@@ -320,6 +333,8 @@ def main() -> None:
         macro_file=args.macro_file,
         ccr_node_file=args.ccr_node_file,
         graph_edge_files=args.graph_edge_files,
+        rp_dim=args.rp_dim,
+        random_seed=args.seed,
     )
 
     sample_inputs, _, _, _, _ = next(iter(train_loader))
@@ -339,6 +354,8 @@ def main() -> None:
         num_transformer_layers=args.num_layers,
         heads=args.num_heads,
         dropout=args.dropout,
+        conv_filters=args.conv_filters,
+        merge_mode=args.merge_mode,
     ).to(device)
 
     criterion = MaskedMSELoss().to(device)
