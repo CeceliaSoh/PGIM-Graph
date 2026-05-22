@@ -1,0 +1,6 @@
+batch_size: 32
+epochs: 10
+eval_interval: 1
+predict_last: false
+early_stopping_patience: 10
+run_name_sufix: "trial"

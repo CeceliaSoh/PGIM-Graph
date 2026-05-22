@@ -1,5 +1,12 @@
 name: V260519
 
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
+
 io_paths:
   input_path: dataset/V260519.csv
   output_folder: dataset/database_260519

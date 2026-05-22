@@ -1,39 +1,34 @@
 import argparse
+import json
+import logging
+import random
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from src.graph.form_edge import FormEdgeProcessor
+from src.graph.form_node import FormNodeProcessor
 
-DEFAULT_GRAPH_EDGE_FILES = (
-    "dist_250.csv",
-    "same_age.csv",
-    "same_mrt_250.csv",
-    "same_mrt_dist_eps_5.csv",
-    "same_planning_area.csv",
-    "same_school_dist_eps_0p01.csv",
-    "size_project.csv",
-)
+DEFAULT_GRAPH_CONFIG_PATH = "src/config/graph/V260519.yaml"
+logger = logging.getLogger(__name__)
 
-ID_COLUMNS = {
-    "node_id",
-    "project_id",
-    "timestep",
-    "project_id_feat",
-    "node_id_feat",
-    "timestep_feat",
-}
-TARGET_COLUMNS = {
-    "rent_per_sqft",
-    "rent_per_sqft_imp",
-    "rent_per_sqft_feat",
-    "y_mask",
-}
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 @dataclass
@@ -60,8 +55,8 @@ class HeteroGraphSpec:
         return f"HeteroGraphSpec(num_nodes={self.num_nodes}, edge_counts={edge_counts})"
 
 
-def infer_feature_columns(frame: pd.DataFrame, extra_exclude=None):
-    excluded = set(extra_exclude or set()).union(ID_COLUMNS).union(TARGET_COLUMNS)
+def infer_feature_columns(frame: pd.DataFrame, id_columns=None, target_columns=None, extra_exclude=None):
+    excluded = set(extra_exclude or set()).union(id_columns or set()).union(target_columns or set())
     return [
         col
         for col in frame.columns
@@ -69,25 +64,98 @@ def infer_feature_columns(frame: pd.DataFrame, extra_exclude=None):
     ]
 
 
-def load_node_table(root: Path, filename: str):
-    node_path = root / "nodes" / filename
-    if not node_path.exists():
-        node_path = root / filename
-    if not node_path.exists():
-        raise FileNotFoundError(f"Could not find {filename} under {root} or {root / 'nodes'}")
-    return pd.read_csv(node_path)
+def to_plain_config(config):
+    if isinstance(config, DictConfig):
+        return OmegaConf.to_container(config, resolve=True)
+    if config is None:
+        return {}
+    return dict(config)
 
 
-def train_minmax_scale(features: np.ndarray, train_steps: int):
-    train_values = features[:train_steps].reshape(-1, features.shape[-1])
-    min_vals = np.nanmin(train_values, axis=0, keepdims=True)
-    max_vals = np.nanmax(train_values, axis=0, keepdims=True)
-    min_vals = np.nan_to_num(min_vals, nan=0.0)
-    max_vals = np.nan_to_num(max_vals, nan=0.0)
-    ranges = max_vals - min_vals
-    ranges[ranges == 0] = 1.0
-    scaled = 2.0 * (features - min_vals.reshape(1, 1, -1)) / ranges.reshape(1, 1, -1) - 1.0
-    return np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+def normalize_loader_config(config):
+    config = to_plain_config(config)
+    if "data" in config:
+        data_config = dict(config["data"])
+        training_config = config.get("training", {})
+        data_config.setdefault("batch_size", training_config.get("batch_size", 32))
+        data_config.setdefault("random_seed", config.get("seed", 42))
+    else:
+        data_config = config
+
+    data_config.setdefault("graph_config_path", DEFAULT_GRAPH_CONFIG_PATH)
+    data_config.setdefault("ts_test", 25)
+    data_config.setdefault("num_hops", 2)
+    data_config.setdefault("batch_size", 32)
+    data_config.setdefault("target_col", "rent_per_sqft_imp")
+    data_config.setdefault("mask_col", "y_mask")
+    data_config.setdefault("feat_norm", True)
+    data_config.setdefault("window_size", 12)
+    data_config.setdefault("target_shift", 1)
+    data_config.setdefault("target_mask_mode", "train_all_test_observed")
+    data_config.setdefault("id_columns", ["node_id", "project_id", "timestep"])
+    data_config.setdefault("target_columns", ["y_mask", "rent_per_sqft", "rent_per_sqft_imp"])
+    data_config.setdefault("extra_exclude_columns", [])
+    data_config.setdefault("rp_dim", 32)
+    data_config.setdefault("random_seed", 42)
+    return data_config
+
+
+def feature_normalize(frame: pd.DataFrame, mode, stats_folder, feature_cols):
+    """Apply saved preprocessing normalization statistics to selected feature columns."""
+    if mode in (None, False, "false", "False", "none", "None", "off", "raw"):
+        return frame.copy()
+
+    mode = "norm1" if mode is True else str(mode)
+    stats_filename = {
+        "norm0": "norm0.json",
+        "norm1": "norm1.json",
+        "stand": "stand.json",
+        "standard": "stand.json",
+        "standardize": "stand.json",
+        "standardise": "stand.json",
+    }.get(mode)
+    if stats_filename is None:
+        raise ValueError(
+            "feat_norm must be one of norm0, norm1, stand, false/raw, "
+            f"got {mode!r}."
+        )
+
+    stats_path = Path(stats_folder) / stats_filename
+    if not stats_path.exists():
+        raise FileNotFoundError(f"Missing normalization stats file: {stats_path}")
+
+    with stats_path.open("r", encoding="utf-8") as f:
+        stats = json.load(f)
+
+    normalized = frame.copy()
+    missing_stats = [col for col in feature_cols if col not in stats]
+    if missing_stats:
+        raise KeyError(
+            f"Missing {mode} stats for feature columns in {stats_path}: {missing_stats}"
+        )
+
+    for col in feature_cols:
+        values = pd.to_numeric(normalized[col], errors="coerce").astype(float)
+        col_stats = stats[col]
+        if stats_filename == "stand.json":
+            std = float(col_stats.get("std", 1.0)) or 1.0
+            normalized[col] = (values - float(col_stats["mean"])) / std
+        else:
+            denominator = float(col_stats.get("denominator", 1.0)) or 1.0
+            target_min = float(col_stats.get("target_min", 0.0))
+            target_max = float(col_stats.get("target_max", 1.0))
+            normalized[col] = (
+                (values - float(col_stats["min"]))
+                / denominator
+                * (target_max - target_min)
+                + target_min
+            )
+
+    normalized[feature_cols] = normalized[feature_cols].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+    return normalized
 
 
 def build_time_node_tensor(frame, node_ids, timesteps, feature_cols):
@@ -158,18 +226,16 @@ def random_project_features(features: np.ndarray, out_dim: int, seed: int):
     return x.numpy().astype(np.float32)
 
 
-def edge_pairs(edge_path: Path):
-    edges = pd.read_csv(edge_path)
+def edge_pairs_from_frame(edges: pd.DataFrame, source):
     if not {"node_id", "neig_node_id"}.issubset(edges.columns):
-        raise ValueError(f"Expected node_id/neig_node_id columns in {edge_path}")
+        raise ValueError(f"Expected node_id/neig_node_id columns in {source}")
     edges = edges[["node_id", "neig_node_id"]].copy()
     edges["node_id"] = pd.to_numeric(edges["node_id"], errors="coerce")
     edges["neig_node_id"] = pd.to_numeric(edges["neig_node_id"], errors="coerce")
     return edges.dropna().astype({"node_id": int, "neig_node_id": int}).drop_duplicates()
 
 
-def build_heterograph(root, graph_edge_files, project_node_ids, size_node_ids):
-    edge_root = Path(root) / "edges"
+def build_heterograph_from_edge_frames(edge_frames, project_node_ids, size_node_ids):
     project_index = {int(node_id): i for i, node_id in enumerate(project_node_ids)}
     size_index = {int(node_id): i for i, node_id in enumerate(size_node_ids)}
     graph_data = {}
@@ -180,9 +246,9 @@ def build_heterograph(root, graph_edge_files, project_node_ids, size_node_ids):
         graph_data[(src_type, etype, dst_type)] = (src_tensor, dst_tensor)
         graph_data[(dst_type, f"rev_{etype}", src_type)] = (dst_tensor, src_tensor)
 
-    for edge_file in graph_edge_files:
-        pairs = edge_pairs(edge_root / edge_file)
-        stem = Path(edge_file).stem
+    for edge_name, edge_frame in edge_frames.items():
+        pairs = edge_pairs_from_frame(edge_frame, edge_name)
+        stem = Path(edge_name).stem
         if stem == "size_project":
             src = pairs["node_id"].map(size_index)
             dst = pairs["neig_node_id"].map(project_index)
@@ -258,117 +324,187 @@ def rphgnn_precompute_contexts(graph, project_features, size_features, num_hops)
 
 
 class RpHGNNWindowDataset(Dataset):
-    def __init__(self, contexts, targets, masks, node_indices, start_times, window_size):
+    def __init__(
+        self,
+        contexts,
+        targets,
+        masks,
+        node_indices,
+        target_start_times,
+        window_size,
+        target_shift=0,
+        min_target_time=None,
+    ):
         self.contexts = contexts.astype(np.float32)
         self.targets = targets.astype(np.float32)
         self.masks = masks.astype(np.float32)
         self.node_indices = np.asarray(node_indices, dtype=np.int64)
-        self.start_times = np.asarray(start_times, dtype=np.int64)
+        self.target_start_times = np.asarray(target_start_times, dtype=np.int64)
         self.window_size = window_size
+        self.target_shift = target_shift
+        self.min_target_time = min_target_time
 
     def __len__(self):
         return len(self.node_indices)
 
     def __getitem__(self, idx):
         node_idx = int(self.node_indices[idx])
-        start = int(self.start_times[idx])
-        end = start + self.window_size
+        target_start = int(self.target_start_times[idx])
+        target_end = target_start + self.window_size
+        input_start = target_start - self.target_shift
+        input_end = input_start + self.window_size
+
+        valid_input_start = max(input_start, 0)
+        valid_input_end = min(input_end, self.contexts.shape[1])
+        if valid_input_end < valid_input_start:
+            valid_input_end = valid_input_start
+
+        input_window = self.contexts[node_idx, valid_input_start:valid_input_end]
+        left_pad = min(self.window_size, max(-input_start, 0))
+        right_pad = self.window_size - left_pad - input_window.shape[0]
+        if left_pad > 0:
+            input_window = np.concatenate(
+                [
+                    np.zeros((left_pad, *self.contexts.shape[2:]), dtype=np.float32),
+                    input_window,
+                ],
+                axis=0,
+            )
+        if right_pad > 0:
+            input_window = np.concatenate(
+                [
+                    input_window,
+                    np.zeros((right_pad, *self.contexts.shape[2:]), dtype=np.float32),
+                ],
+                axis=0,
+            )
+
+        target_mask_window = self.masks[node_idx, target_start:target_end].copy()
+        if self.min_target_time is not None:
+            target_mask_window[: max(int(self.min_target_time) - target_start, 0)] = 0.0
         return (
-            torch.from_numpy(self.contexts[node_idx, start:end]),
-            torch.from_numpy(self.targets[node_idx, start:end, None]),
-            torch.from_numpy(self.masks[node_idx, start:end, None]),
+            torch.from_numpy(input_window),
+            torch.from_numpy(self.targets[node_idx, target_start:target_end, None]),
+            torch.from_numpy(target_mask_window[:, None]),
             torch.tensor(node_idx, dtype=torch.long),
-            torch.tensor(start, dtype=torch.long),
+            torch.tensor(target_start, dtype=torch.long),
         )
 
 
-def build_window_indices(masks, window_size, train_steps):
-    train_nodes, train_starts, test_nodes, test_starts = [], [], [], []
+def build_window_indices(masks, window_size, train_steps, target_shift=0):
+    train_nodes, train_target_starts, test_nodes, test_target_starts = [], [], [], []
     num_nodes, num_timesteps = masks.shape
+    max_target_start = num_timesteps - window_size + 1
+    if max_target_start <= 0:
+        raise ValueError(
+            f"window_size must be <= number of timesteps, got "
+            f"window_size={window_size}, T={num_timesteps}."
+        )
+
     for node_idx in range(num_nodes):
-        for start in range(0, num_timesteps - window_size + 1):
-            end = start + window_size
-            mask_window = masks[node_idx, start:end]
-            if end <= train_steps:
+        for target_start in range(max_target_start):
+            target_end = target_start + window_size
+            mask_window = masks[node_idx, target_start:target_end]
+            if target_end <= train_steps:
+                if target_start - target_shift < 0:
+                    continue
                 if mask_window.sum() > 0:
                     train_nodes.append(node_idx)
-                    train_starts.append(start)
+                    train_target_starts.append(target_start)
             else:
                 eval_mask = mask_window.copy()
-                eval_mask[: max(train_steps - start, 0)] = 0.0
+                eval_mask[: max(train_steps - target_start, 0)] = 0.0
                 if eval_mask.sum() > 0:
                     test_nodes.append(node_idx)
-                    test_starts.append(start)
-    return (train_nodes, train_starts), (test_nodes, test_starts)
+                    test_target_starts.append(target_start)
+    return (train_nodes, train_target_starts), (test_nodes, test_target_starts)
 
 
-def get_dataloaders(
-    root="dataset/database_260519",
-    egde_file=None,
-    ts_test=25,
-    k=2,
-    batch_size=32,
-    shift=1,
-    no_feat_col=None,
-    target_col="rent_per_sqft_imp",
-    mask_col="y_mask",
-    feat_norm=True,
-    window_size=12,
-    target_mask_mode="train_all_test_observed",
-    ccr=True,
-    nodes_dir=None,
-    ccr_node_file=None,
-    edges_dir=None,
-    graph_edge_files=None,
-    macro_file=None,
-    rp_dim=32,
-    random_seed=42,
-):
-    del egde_file, shift, ccr, nodes_dir, ccr_node_file, edges_dir, macro_file
+def get_dataloaders(config):
+    loader_config = normalize_loader_config(config)
+    ts_test = loader_config["ts_test"]
+    num_hops = loader_config["num_hops"]
+    batch_size = loader_config["batch_size"]
+    target_col = loader_config["target_col"]
+    mask_col = loader_config["mask_col"]
+    feat_norm = loader_config["feat_norm"]
+    window_size = loader_config["window_size"]
+    target_shift = loader_config["target_shift"]
+    target_mask_mode = loader_config["target_mask_mode"]
+    rp_dim = loader_config["rp_dim"]
+    random_seed = loader_config["random_seed"]
 
-    root = Path(root)
-    graph_edge_files = list(graph_edge_files or DEFAULT_GRAPH_EDGE_FILES)
+    if target_shift < 0:
+        raise ValueError(f"target_shift must be >= 0, got {target_shift}.")
 
-    node_map = pd.read_csv(root / "node_id.csv")
+    node_processor = FormNodeProcessor(config.graph)
+    edge_processor = FormEdgeProcessor(config.graph)
+    node_processor.process()
+    edge_processor.process()
+    
+    node_map, project_frame, size_frame = node_processor.load_node_tables()
+    edge_dfs = edge_processor.load_enabled_edge_dfs()
+
     project_node_ids = node_map.loc[node_map["size_tier"].eq(0), "node_id"].astype(int).sort_values().tolist()
     size_node_ids = node_map.loc[~node_map["size_tier"].eq(0), "node_id"].astype(int).sort_values().tolist()
-
-    project_frame = load_node_table(root, "project_level_node.csv")
-    size_frame = load_node_table(root, "size_level_node.csv")
+    logger.info(
+        "Project nodes in each timestep: %s, Size nodes: %s",
+        len(project_node_ids),
+        len(size_node_ids),
+    )
     timesteps = sorted(size_frame["timestep"].dropna().astype(int).unique().tolist())
+    logger.info("Total Timesteps: %s", len(timesteps))
     if ts_test <= 0 or ts_test >= len(timesteps):
         raise ValueError(f"ts_test must be in [1, T-1], got ts_test={ts_test}, T={len(timesteps)}")
     train_steps = len(timesteps) - ts_test
+    logger.info("Train steps: %s, Test steps: %s", train_steps, ts_test)
 
-    extra_exclude = set(no_feat_col or [])
-    project_feature_cols = infer_feature_columns(project_frame, extra_exclude)
-    size_feature_cols = infer_feature_columns(size_frame, extra_exclude)
+    extra_exclude = loader_config["extra_exclude_columns"]
+    target_cols = loader_config["target_columns"]
+    id_cols = loader_config["id_columns"]
+    project_feature_cols = infer_feature_columns(project_frame, id_cols, target_cols, extra_exclude)
+    size_feature_cols = infer_feature_columns(size_frame, id_cols, target_cols, extra_exclude)
+
     if not project_feature_cols or not size_feature_cols:
         raise ValueError("Project and size node tables must each have at least one numeric feature column.")
 
-    print(
+    logger.info(
         "Using database_260519 RpHGNN loader: "
-        f"project_nodes={len(project_node_ids)}, size_nodes={len(size_node_ids)}, "
-        f"timesteps={len(timesteps)}, project_feat={len(project_feature_cols)}, "
-        f"size_feat={len(size_feature_cols)}, rp_dim={rp_dim}"
+        "project_nodes=%s, size_nodes=%s, timesteps=%s, project_feat=%s, "
+        "size_feat=%s, rp_dim=%s, target_shift=%s",
+        len(project_node_ids),
+        len(size_node_ids),
+        len(timesteps),
+        len(project_feature_cols),
+        len(size_feature_cols),
+        rp_dim,
+        target_shift,
+    )
+
+    project_frame = feature_normalize(
+        project_frame,
+        feat_norm,
+        node_processor.out_paths["project_node_folder"],
+        project_feature_cols,
+    )
+    size_frame = feature_normalize(
+        size_frame,
+        feat_norm,
+        node_processor.out_paths["size_node_folder"],
+        size_feature_cols,
     )
 
     project_features = build_time_node_tensor(project_frame, project_node_ids, timesteps, project_feature_cols)
     size_features = build_time_node_tensor(size_frame, size_node_ids, timesteps, size_feature_cols)
-    if feat_norm:
-        project_features = train_minmax_scale(project_features, train_steps)
-        size_features = train_minmax_scale(size_features, train_steps)
-    else:
-        project_features = np.nan_to_num(project_features, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        size_features = np.nan_to_num(size_features, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
 
     project_features = random_project_features(project_features, rp_dim, random_seed + 17)
     size_features = random_project_features(size_features, rp_dim, random_seed + 29)
 
-    graph = build_heterograph(root, graph_edge_files, project_node_ids, size_node_ids)
-    print(f"Heterograph: {graph}")
-    contexts, group_names = rphgnn_precompute_contexts(graph, project_features, size_features, k)
-    print(f"RpHGNN groups: {group_names}")
+    graph = build_heterograph_from_edge_frames(edge_dfs, project_node_ids, size_node_ids)
+    logger.info("Heterograph: %s", graph)
+    contexts, group_names = rphgnn_precompute_contexts(graph, project_features, size_features, num_hops)
+    logger.info("RpHGNN groups: %s", group_names)
 
     targets, masks = build_target_tensor(
         size_frame=size_frame,
@@ -379,35 +515,91 @@ def get_dataloaders(
         target_mask_mode=target_mask_mode,
         train_steps=train_steps,
     )
-    (train_nodes, train_starts), (test_nodes, test_starts) = build_window_indices(masks, window_size, train_steps)
-
-    train_ds = RpHGNNWindowDataset(contexts, targets, masks, train_nodes, train_starts, window_size)
-    test_ds = RpHGNNWindowDataset(contexts, targets, masks, test_nodes, test_starts, window_size)
-    print(
-        f"Train samples: {len(train_ds)} | Test samples: {len(test_ds)} | "
-        f"Per-sample input: (window={window_size}, groups={contexts.shape[2]}, "
-        f"K+1={contexts.shape[3]}, rp_dim={contexts.shape[4]})"
+    (train_nodes, train_target_starts), (test_nodes, test_target_starts) = build_window_indices(
+        masks,
+        window_size,
+        train_steps,
+        target_shift,
     )
+
+    train_ds = RpHGNNWindowDataset(
+        contexts,
+        targets,
+        masks,
+        train_nodes,
+        train_target_starts,
+        window_size,
+        target_shift=target_shift,
+    )
+    test_ds = RpHGNNWindowDataset(
+        contexts,
+        targets,
+        masks,
+        test_nodes,
+        test_target_starts,
+        window_size,
+        target_shift=target_shift,
+        min_target_time=train_steps,
+    )
+    logger.info(
+        "Train samples: %s | Test samples: %s | "
+        "Per-sample input: (window=%s, groups=%s, K+1=%s, rp_dim=%s), target_shift=%s",
+        len(train_ds),
+        len(test_ds),
+        window_size,
+        contexts.shape[2],
+        contexts.shape[3],
+        contexts.shape[4],
+        target_shift,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(random_seed)
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False),
-        DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=False),
+        DataLoader(
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+            generator=generator,
+            worker_init_fn=seed_worker,
+        ),
+        DataLoader(
+            test_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            worker_init_fn=seed_worker,
+        ),
     )
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     parser = argparse.ArgumentParser(description="Debug database_260519 RpHGNN dataloader construction")
-    parser.add_argument("--root", type=str, default="dataset/database_260519")
+    parser.add_argument("--graph-config", type=str, default=DEFAULT_GRAPH_CONFIG_PATH)
     parser.add_argument("--num-hops", type=int, default=2)
     parser.add_argument("--window-size", type=int, default=12)
+    parser.add_argument("--target-shift", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--rp-dim", type=int, default=32)
     args = parser.parse_args()
-    train_loader, test_loader = get_dataloaders(
-        root=args.root,
-        k=args.num_hops,
-        window_size=args.window_size,
-        batch_size=args.batch_size,
-        rp_dim=args.rp_dim,
+    graph_config = OmegaConf.load(args.graph_config)
+    cfg = OmegaConf.create(
+        {
+            "graph": graph_config,
+            "data": {
+                "graph_config_path": args.graph_config,
+                "num_hops": args.num_hops,
+                "window_size": args.window_size,
+                "target_shift": args.target_shift,
+                "rp_dim": args.rp_dim,
+            },
+            "training": {
+                "batch_size": args.batch_size,
+            },
+            "seed": 42,
+        }
     )
+    train_loader, test_loader = get_dataloaders(cfg)
     batch = next(iter(train_loader))
-    print([item.shape if hasattr(item, "shape") else item for item in batch])
+    logger.info("First train batch: %s", [item.shape if hasattr(item, "shape") else item for item in batch])

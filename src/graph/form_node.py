@@ -4,14 +4,17 @@ import json
 import logging
 from pathlib import Path
 
+import hydra
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 import pandas as pd
-import yaml
 
 logger = logging.getLogger(__name__)
 
 class FormNodeProcessor:
     def __init__(self, config):
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_container(config, resolve=True)
         self.config = config
         self.in_paths, self.out_paths = self.set_io_paths(config["io_paths"], config["io_node_paths"])
         
@@ -646,6 +649,8 @@ class FormNodeProcessor:
             logger.info("All output paths exist; loading cached node files")
             proj_node_df = pd.read_csv(self.out_paths["project_node_path"])
             size_node_df = pd.read_csv(self.out_paths["size_node_path"])
+            self.project_node_df = proj_node_df
+            self.size_node_df = size_node_df
             logger.info(
                 "Loaded cached nodes: project_node_shape=%s size_node_shape=%s",
                 proj_node_df.shape,
@@ -689,20 +694,29 @@ class FormNodeProcessor:
         # preprocess project node
         proj_node_df = self.process_n_store_project_node(proj_node_df, self.config["project_node"])
         logger.info("Processed and saved project nodes: shape=%s", proj_node_df.shape)
-        return proj_node_df, size_node_df
+        self.project_node_df = proj_node_df
+        self.size_node_df = size_node_df
 
+    def load_node_tables(self):
+        logger.info(
+            "Loaded node tables: project_node_shape=%s size_node_shape=%s",
+            self.project_node_df.shape,
+            self.size_node_df.shape,
+        )
+        return pd.read_csv(self.node_id_path), self.project_node_df, self.size_node_df
     
-
-
-if __name__ == "__main__":
+@hydra.main(config_path="../config/graph", config_name="V260519", version_base=None)
+def main(cfg: DictConfig) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    config_path = Path("src/config/graph/V260519.yaml")
-    with config_path.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    logger.info("Loaded config: path=%s name=%s", config_path, config.get("name"))
+    config = OmegaConf.to_container(cfg, resolve=True)
+    logger.info("Loaded Hydra graph config: name=%s", config.get("name"))
     
     node_processor = FormNodeProcessor(config)
     node_processor.process()
+
+
+if __name__ == "__main__":
+    main()

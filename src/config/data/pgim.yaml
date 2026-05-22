@@ -1,0 +1,22 @@
+graph_config_path: src/config/graph/V260519.yaml
+
+# Null derives the generated dataset root from graph_config_path -> io_paths.output_folder.
+root: null
+prepare_graph: true
+
+ts_test: 73
+target_mask_mode: observed_only
+target_col: rent_per_sqft
+mask_col: y_mask
+feat_norm: norm1 # norm0/norm1/stand
+graph_edge_files: null
+id_columns: ["node_id", "project_id", "timestep"]
+target_columns: [y_mask, rent_per_sqft, rent_per_sqft_feat]
+extra_exclude_columns: []
+
+
+
+num_hops: 2
+window_size: 12
+target_shift: 1
+rp_dim: 32

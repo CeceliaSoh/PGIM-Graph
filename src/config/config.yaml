@@ -1,0 +1,18 @@
+defaults:
+  - data: pgim
+  - graph: V260519
+  - model: gnn_regressor
+  - training: default
+  - optimizer: adamw
+  - logging: wandb
+  - evaluation: default
+  - paths: default
+  - _self_
+
+seed: 42
+deterministic: true
+device: auto
+
+hydra:
+  job:
+    chdir: false

@@ -1,0 +1,238 @@
+data:
+  graph_config_path: src/config/graph/V260519.yaml
+  root: null
+  prepare_graph: true
+  ts_test: 73
+  target_mask_mode: observed_only
+  target_col: rent_per_sqft
+  mask_col: y_mask
+  feat_norm: norm1
+  graph_edge_files: null
+  id_columns:
+  - node_id
+  - project_id
+  - timestep
+  target_columns:
+  - y_mask
+  - rent_per_sqft
+  - rent_per_sqft_feat
+  extra_exclude_columns: []
+  num_hops: 2
+  window_size: 12
+  target_shift: 1
+  rp_dim: 16
+graph:
+  name: V260519
+  hydra:
+    run:
+      dir: .
+    output_subdir: null
+    job:
+      chdir: false
+  io_paths:
+    input_path: dataset/V260519.csv
+    output_folder: dataset/database_260519
+    full_project_location_path: dataset/project_location.csv
+    mrt_info_path: dataset/Rail_Transport.csv
+  io_node_paths:
+    project_info_filename: project_info
+    timestep_info_filename: timestep_info
+    node_id_filename: node_id
+    project_node_filename: project_level_node
+    size_node_filename: size_level_node
+    data_file_ext: .csv
+    standardisation_file: stand.json
+    normalisation01_file: norm0.json
+    normalisation11_file: norm1.json
+  overwrite: false
+  rename:
+    date: yyyymm
+    project_name: condo_name
+    node_id: null
+    project_id: null
+    timestep: null
+    rent_per_sqft: rent_psf_obs
+    rent_per_sqft_imp: rent_psf_imp
+    y_mask: was_observed
+    longitude: null
+    latitude: null
+    Condo_Age_2026: Condo_Age_2026
+    Planning Area: Planning Area
+    nearest_school_dist: nearest_school_dist
+  standard_cols:
+  - node_id
+  - project_id
+  - project_name
+  - timestep
+  - date
+  - size_tier
+  - rent_per_sqft
+  - y_mask
+  project_info:
+    cols:
+    - project_id
+    - project_name
+    - latitude
+    - longitude
+    - Condo_Age_2026
+    - Planning Area
+    - nearest_school_dist
+    other_feat: false
+    to_drop: []
+    first_few:
+    - project_id
+    - project_name
+    last_few: []
+    sort_by:
+    - project_id
+  timestep_info:
+    cols:
+    - timestep
+    - date
+    other_feat: false
+    to_drop: []
+    first_few:
+    - timestep
+    - date
+    last_few: []
+    sort_by:
+    - timestep
+  form_project_node:
+    to_drop:
+    - size_tier
+    - rent_per_sqft_imp
+    - y_mask
+    - date
+    - project_name
+    group_by:
+    - project_id
+    - timestep
+  reindex_node_id:
+    group_by:
+    - project_id
+    - size_tier
+    sort_by:
+    - project_id
+    - size_tier
+  size_node:
+    cols:
+    - node_id
+    - project_id
+    - timestep
+    - rent_per_sqft
+    - rent_per_sqft_imp
+    - y_mask
+    other_feat: false
+    categorical:
+    - size_tier
+    as_feat:
+    - project_id
+    - timestep
+    - rent_per_sqft
+    to_drop: []
+    no_norm:
+    - node_id
+    - project_id
+    - timestep
+    - rent_per_sqft
+    - y_mask
+    first_few:
+    - node_id
+    - project_id
+    - timestep
+    last_few:
+    - rent_per_sqft_imp
+    - rent_per_sqft
+    - y_mask
+    sort_by:
+    - node_id
+    - project_id
+    - timestep
+  project_node:
+    cols: []
+    other_feat: true
+    max_clip_glo:
+    - _dist
+    - School
+    - Institution
+    as_feat:
+    - timestep
+    - node_id
+    - rent_per_sqft
+    to_drop:
+    - date
+    - project_name
+    - rent_per_sqft_imp
+    categorical:
+    - district
+    - size_tier
+    - Planning Area
+    first_few:
+    - timestep
+    - node_id
+    - project_id
+    last_few:
+    - rent_per_sqft
+    - y_mask
+    sort_by:
+    - node_id
+    - project_id
+    - timestep
+  edges:
+    data_file_ext: .csv
+    dist:
+      name: dist
+      enable: true
+      threshold: 250
+    same_mrt:
+      name: same_mrt
+      enable: true
+      threshold: 250
+    same_mrt_dist:
+      name: same_mrt_dist
+      epsilon: 5
+      enable: true
+    same_school_dist:
+      name: same_school_dist
+      epsilon: 0.01
+      enable: true
+    same_age:
+      name: same_age
+      enable: true
+    same_planning_area:
+      name: same_planning_area
+      enable: false
+    size_project:
+      name: size_project
+      enable: true
+model:
+  hidden_dim: 16
+  mlp_layers: 1
+  num_layers: 1
+  num_heads: 4
+  dropout: 0.5
+  conv_filters: 1
+  merge_mode: mean
+training:
+  batch_size: 128
+  epochs: 100
+  eval_interval: 1
+  predict_last: false
+  early_stopping_patience: 10
+  run_name_sufix: shift1_tiny_h16_hop2_rp16_do05_wd1e1_no_planning_area
+optimizer:
+  learning_rate: 5.0e-05
+  weight_decay: 0.1
+logging:
+  wandb_project: pgim-rphgnn-shift1
+  entity: ccliasub-national-university-of-singapore
+evaluation:
+  tracked_indices:
+  - 0
+  - 6
+  - 11
+paths:
+  checkpoint_dir: checkpoints
+seed: 42
+deterministic: true
+device: auto

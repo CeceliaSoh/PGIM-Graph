@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import warnings
 from pathlib import Path
-from typing import Any
 
+import hydra
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 import pandas as pd
-import yaml
 
 # from src.utils.utils import check_config_keys
 
@@ -17,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 class FormEdgeProcessor:
     def __init__(self, config):
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_container(config, resolve=True)
         self.config = config
         self.in_paths, self.out_paths = self.set_io_paths(config["io_paths"], config["io_node_paths"], config["edges"])
         self.project_df = self.load_project_data(self.in_paths["project_info_path"])
@@ -647,18 +646,46 @@ class FormEdgeProcessor:
             logger.info("Creating edge: %s path=%s", edge_key, out_path)
             create_edges()
 
+    def load_enabled_edge_dfs(self):
+        edge_dfs = {}
+        for edge_key, edge_config in self.config["edges"].items():
+            if not isinstance(edge_config, dict):
+                continue
+            if not edge_config["enable"]:
+                continue
 
+            out_path = self.out_paths[edge_key]
+            if not out_path.exists():
+                logger.warning(
+                    "Enabled edge file does not exist: %s path=%s",
+                    edge_key,
+                    out_path,
+                )
+                continue
 
+            edge_df = pd.read_csv(out_path)
+            edge_dfs[edge_key] = edge_df
+            logger.info(
+                "Loaded edge: %s path=%s rows=%s",
+                edge_key,
+                out_path,
+                len(edge_df),
+            )
 
-if __name__ == "__main__":
+        return edge_dfs
+    
+@hydra.main(config_path="../config/graph", config_name="V260519", version_base=None)
+def main(cfg: DictConfig) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    config_path = Path("src/config/graph/V260519.yaml")
-    with config_path.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    logger.info("Loaded config: path=%s name=%s", config_path, config.get("name"))
+    config = OmegaConf.to_container(cfg, resolve=True)
+    logger.info("Loaded Hydra graph config: name=%s", config.get("name"))
     
     edge_processor = FormEdgeProcessor(config)
     edge_processor.process()
+
+
+if __name__ == "__main__":
+    main()

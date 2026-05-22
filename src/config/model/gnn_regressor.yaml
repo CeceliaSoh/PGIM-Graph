@@ -1,0 +1,7 @@
+hidden_dim: 64
+mlp_layers: 2
+num_layers: 2
+num_heads: 4
+dropout: 0.1
+conv_filters: 2
+merge_mode: concat
