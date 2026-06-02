@@ -11,7 +11,7 @@ from datetime import datetime
 
 from src.data.pgim import get_dataloaders
 from src.models.gnn_regressor import GNNRegressor
-from src.trainer import train_model
+from src.trainer import Trainer
 from src.utils.loss import MaskedMSELoss
 
 
@@ -126,7 +126,7 @@ def main(cfg: DictConfig) -> None:
         weight_decay=cfg.optimizer.weight_decay,
     )
 
-    train_model(
+    trainer = Trainer(
         model,
         train_loader,
         test_loader,
@@ -141,6 +141,7 @@ def main(cfg: DictConfig) -> None:
         best_model_path=best_model_path,
         checkpoint_config=OmegaConf.to_container(cfg, resolve=True),
     )
+    trainer.train()
 
     wandb.finish()
 

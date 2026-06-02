@@ -223,6 +223,7 @@ dataset_v0/
 experiments/
 checkpoints/
 wandb/
+outputs/
 
 .codex
 
